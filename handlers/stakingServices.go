@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"eth2-exporter/mail"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
@@ -9,31 +10,28 @@ import (
 	"net/http"
 )
 
-var stakingServicesTemplate = template.Must(template.New("stakingServices").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/stakingServices.html", "templates/components/bannerStakingServices.html"))
-
 func StakingServices(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "stakingServices.html")
+	var stakingServicesTemplate = templates.GetTemplate(templateFiles...)
+
 	var err error
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "services", "/stakingServices", "Ethereum 2.0 Staking Services Overview")
+	data := InitPageData(w, r, "services", "/stakingServices", "Ethereum Staking Services Overview", templateFiles)
 
 	pageData := &types.StakeWithUsPageData{}
 	pageData.RecaptchaKey = utils.Config.Frontend.RecaptchaSiteKey
 	pageData.FlashMessage, err = utils.GetFlash(w, r, "stake_flash")
 	if err != nil {
 		logger.Errorf("error retrieving flashes for advertisewithusform %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
-	pageData.NoAds = data.NoAds
 	data.Data = pageData
 
-	err = stakingServicesTemplate.ExecuteTemplate(w, "layout", data)
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "stakingServices.go", "StakingServices", "", stakingServicesTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
@@ -57,7 +55,7 @@ func AddStakingServicePost(w http.ResponseWriter, r *http.Request) {
 		valid, err := utils.ValidateReCAPTCHA(r.FormValue("g-recaptcha-response"))
 		if err != nil || !valid {
 			utils.SetFlash(w, r, "pricing_flash", "Error: Failed to create request")
-			logger.Errorf("error validating recaptcha %v route: %v", r.URL.String(), err)
+			logger.Warnf("error validating recaptcha %v route: %v", r.URL.String(), err)
 			http.Redirect(w, r, "/pricing", http.StatusSeeOther)
 			return
 		}

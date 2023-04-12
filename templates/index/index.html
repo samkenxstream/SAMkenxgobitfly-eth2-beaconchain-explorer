@@ -5,7 +5,6 @@
   <script src="/js/vue.min.js"></script>
   <script src="/js/highcharts/highcharts-vue.min.js"></script>
   <script src="/js/highcharts/highcharts-global-options.js"></script>
-  <script src="/js/requestInterval.js"></script>
 
   <!-- <script type="text/javascript" src="js/slick.min.js"></script> -->
   <!-- <script type="text/javascript" src="//cdn.jsdelivr.net/npm/slick-carousel@1.8.1/slick/slick.min.js"></script> -->
@@ -14,6 +13,7 @@
     <script src="/js/d3.min.js"></script>
   {{ end }}
     <script>
+        var creditsEnabled = {{ if  .SlotVizData }} false {{ else }} true {{ end }}
         var app = new Vue({
             el: '#app',
             delimiters: ['${', '}'], // Standard vuejs template syntax conflicts with golang template syntax
@@ -31,6 +31,7 @@
                     updateIn: -1,
                     page: {{.}},
                     chartOptions: {
+                        credits: { enabled: creditsEnabled },
                         rangeSelector: {enabled: false},
                         navigator: {enabled: false},
                         scrollbar: {enabled: false},
@@ -131,22 +132,6 @@
                         return 0
                     }
                 },
-
-                validatorsMissing: function () {
-                    var eligible = 0
-                    var voted = 0
-                    if (this.page && this.page.epochs && this.page.epochs.length && this.page.epochs[0].globalparticipationrate !== 0) {
-                        eligible = this.page.epochs[0].eligibleether
-                        voted = this.page.epochs[0].votedether
-                    } else if (this.page && this.page.epochs && this.page.epochs.length > 1) {
-                        eligible = this.page.epochs[1].eligibleether
-                        voted = this.page.epochs[1].votedether
-                    } else {
-                        return 0
-                    }
-                    var missingEther = (eligible * 0.66) - voted
-                    return Math.round(missingEther / 32e9)
-                },
                 scheduledCount: function () {
                     return this.page.scheduled_count
                 },
@@ -156,7 +141,7 @@
             },
             filters: {
                 fromNow(date) {
-                    return luxon.DateTime.fromISO(date).toRelative({ style: "short"});
+                    return getRelativeTime(luxon.DateTime.fromISO(date));
                 }
             },
             created: function () {
@@ -171,7 +156,7 @@
                         $.getJSON('/index/data', function (response) {
                             this.page = response;
                         }.bind(this));
-                        this.updateIn = 15;
+                        this.updateIn = 5;
                     } else {
                         this.updateIn--;
                     }
@@ -198,6 +183,16 @@
     <link rel="stylesheet" href="/css/rocket.css" />
   {{ end }}
 
+
+  <style>
+    #slotsViz > svg {
+      overflow: visible;
+    }
+    svg rect[slot],
+    svg rect[epoch] {
+      cursor: pointer;
+    }
+  </style>
 
   <style>
     .hero-container {
@@ -361,12 +356,9 @@
   <div class="container mt-2">
     <div id="app" v-cloak>
       {{ with .Data }}
-        {{ if and (and (not .ShowSyncingMessage) .Genesis) (not .GenesisPeriod) }}
-          {{ template "participationWarning" . }}
-        {{ end }}
         {{ template "hero" . }}
       {{ end }}
-      {{ if not .NoAds }}{{ template "banner" }}{{ end }}
+      <div id="r-banner" info="{{ .Meta.Templates }}"></div>
       {{ with .Data }}
         {{ if and (not .Genesis) (not .GenesisPeriod) }}
           {{ template "preGenesis" $ }}
@@ -378,4 +370,5 @@
       {{ end }}
     </div>
   </div>
+  {{ if .Data.SlotVizData }}{{ template "SlotViz" . }}{{ end }}
 {{ end }}

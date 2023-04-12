@@ -21,7 +21,7 @@ func StripeRemoveCustomer(customerID string) error {
 	if err == nil {
 		now := time.Now()
 		nowTs := now.Unix()
-		_, err = tx.Exec("UPDATE users_app_subscriptions SET active = $1, updated_at = TO_TIMESTAMP($2), expires_at = TO_TIMESTAMP($3), reject_reason = $4 WHERE user_id = $5 AND store = 'stripe';",
+		_, _ = tx.Exec("UPDATE users_app_subscriptions SET active = $1, updated_at = TO_TIMESTAMP($2), expires_at = TO_TIMESTAMP($3), reject_reason = $4 WHERE user_id = $5 AND store = 'stripe';",
 			false, nowTs, nowTs, "stripe_user_deleted", userID,
 		)
 	} else {
@@ -73,6 +73,7 @@ func StripeUpdateSubscription(tx *sql.Tx, priceID, subscriptionID string, payloa
 func StripeUpdateSubscriptionStatus(tx *sql.Tx, id string, status bool, payload *json.RawMessage) error {
 	var err error
 	var useInternTx bool = tx == nil
+	var result sql.Result
 	if useInternTx {
 		tx, err := FrontendWriterDB.Begin()
 		if err != nil {
@@ -82,15 +83,24 @@ func StripeUpdateSubscriptionStatus(tx *sql.Tx, id string, status bool, payload 
 	}
 
 	if payload == nil {
-		_, err = tx.Exec("UPDATE users_stripe_subscriptions SET active = $2 WHERE subscription_id = $1", id, status)
+		result, err = tx.Exec("UPDATE users_stripe_subscriptions SET active = $2 WHERE subscription_id = $1", id, status)
 		if err != nil {
 			return err
 		}
 	} else {
-		_, err = tx.Exec("UPDATE users_stripe_subscriptions SET active = $2, payload = $3 WHERE subscription_id = $1", id, status, payload)
+		result, err = tx.Exec("UPDATE users_stripe_subscriptions SET active = $2, payload = $3 WHERE subscription_id = $1", id, status, payload)
 		if err != nil {
 			return err
 		}
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected <= 0 {
+		return fmt.Errorf("no rows affected")
 	}
 
 	if useInternTx {
@@ -103,7 +113,7 @@ func StripeUpdateSubscriptionStatus(tx *sql.Tx, id string, status bool, payload 
 // StripeGetUserAPISubscription returns a users current subscription
 func StripeGetUserSubscription(id uint64, purchaseGroup string) (types.UserSubscription, error) {
 	userSub := types.UserSubscription{}
-	err := FrontendWriterDB.Get(&userSub, "SELECT id, email, stripe_customer_id, subscription_id, price_id, active, api_key FROM users LEFT JOIN (SELECT * FROM users_stripe_subscriptions WHERE purchase_group = $2 and (payload->'ended_at')::text = 'null') as us ON users.stripe_customer_id = us.customer_id WHERE users.id = $1 ORDER BY active desc LIMIT 1", id, purchaseGroup)
+	err := FrontendWriterDB.Get(&userSub, "SELECT users.id, users.email, users.stripe_customer_id, us.subscription_id, us.price_id, us.active, users.api_key FROM users LEFT JOIN (SELECT subscription_id, customer_id, price_id, active FROM users_stripe_subscriptions WHERE purchase_group = $2 and (payload->'ended_at')::text = 'null') as us ON users.stripe_customer_id = us.customer_id WHERE users.id = $1 ORDER BY active desc LIMIT 1", id, purchaseGroup)
 	return userSub, err
 }
 

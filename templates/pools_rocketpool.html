@@ -43,6 +43,12 @@
         {
           targets: 4,
           render: function (data, type, row, meta) {
+            return `${data} ETH`
+          },
+        },
+        {
+          targets: 5,
+          render: function (data, type, row, meta) {
             if (data === "Empty") {
               return `<span class="badge badge-pill badge-light badge-custom">${data}</span>`
             }
@@ -53,7 +59,7 @@
           },
         },
         {
-          targets: 5,
+          targets: 6,
           render: function (data, type, row, meta) {
             if (data === "Initialized") {
               return `<span class="badge badge-pill badge-success badge-custom text-white">${data}</span>`
@@ -66,6 +72,9 @@
             }
             return `<span class="badge badge-pill badge-info badge-custom text-white">${data}</span>`
           },
+        },
+        {
+          targets: 7,
         },
       ],
       initComplete: function (settings, json) {
@@ -150,6 +159,24 @@
             return `${data} RPL`
           },
         },
+        {
+          targets: 5,
+          render: function (data, type, row, meta) {
+            if (parseInt(data) !== 0) {
+              return `${(parseInt(data) / 10 ** 18).toFixed(2)} RPL`
+            }
+            return `${data} RPL`
+          },
+        },
+        {
+          targets: 6,
+          render: function (data, type, row, meta) {
+            if (parseInt(data) !== 0) {
+              return `${(parseInt(data) / 10 ** 18).toFixed(0)} ETH`
+            }
+            return `${data} ETH`
+          },
+        },
       ],
       initComplete: function (settings, json) {
         $("#nodes .first-col a").on("click", function (e) {
@@ -209,13 +236,13 @@
         {
           targets: 3,
           render: function (data, type, row, meta) {
-            return `<span style="font-size: .9rem; font-weight: 400;">${luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000).toRelative({ style: "long" })}</span>`
+            return `<span style="font-size: .9rem; font-weight: 400;">${getRelativeTime(luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000))}</span>`
           },
         },
         {
           targets: 4,
           render: function (data, type, row, meta) {
-            return `<span style="font-size: .9rem; font-weight: 400;">${luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000).toRelative({ style: "long" })}</span>`
+            return `<span style="font-size: .9rem; font-weight: 400;">${getRelativeTime(luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000))}</span>`
           },
         },
         {
@@ -255,6 +282,7 @@
           next: '<i class="fas fa-chevron-right"></i>',
         },
       },
+      order: [[0, "desc"]],
       paging: true,
       pagingType: "input",
       processing: true,
@@ -287,25 +315,25 @@
         {
           targets: 4,
           render: function (data, type, row, meta) {
-            return `<span style="font-size: .9rem; font-weight: 400;">${luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000).toRelative({ style: "long" })}</span>`
+            return `<span style="font-size: .9rem; font-weight: 400;">${getRelativeTime(luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000))}</span>`
           },
         },
         {
           targets: 5,
           render: function (data, type, row, meta) {
-            return `<span style="font-size: .9rem; font-weight: 400;">${luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000).toRelative({ style: "long" })}</span>`
+            return `<span style="font-size: .9rem; font-weight: 400;">${getRelativeTime(luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000))}</span>`
           },
         },
         {
           targets: 6,
           render: function (data, type, row, meta) {
-            return `<span style="font-size: .9rem; font-weight: 400;">${luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000).toRelative({ style: "long" })}</span>`
+            return `<span style="font-size: .9rem; font-weight: 400;">${getRelativeTime(luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000))}</span>`
           },
         },
         {
           targets: 7,
           render: function (data, type, row, meta) {
-            return `<span style="font-size: .9rem; font-weight: 400;">${luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000).toRelative({ style: "long" })}</span>`
+            return `<span style="font-size: .9rem; font-weight: 400;">${getRelativeTime(luxon.DateTime.fromMillis(parseInt($(data).attr("data-timestamp")) * 1000))}</span>`
           },
         },
         {
@@ -377,6 +405,15 @@
             return `<span class="badge badge-pill badge-info badge-custom text-white">${data}</span>`
           },
         },
+        {
+          targets: 17,
+          render: function (data, type, row, meta) {
+            if (data) {
+              return data
+            }
+            return ""
+          },
+        },
       ],
       preDrawCallback: function () {
         try {
@@ -398,15 +435,18 @@
       font-size: 12px;
       font-weight: 500;
     }
+
     #slashings td:first-child {
       white-space: break-spaces;
     }
+
     #minipools_wrapper div.dataTables_paginate ul li,
     #nodes_wrapper div.dataTables_paginate ul li,
     #dao_members_wrapper div.dataTables_paginate ul li,
     #dao_proposals_wrapper div.dataTables_paginate ul li {
       background-color: var(--bg-color);
     }
+
     div.dataTables_filter {
       margin-top: 2.5px;
       margin-right: 3px;
@@ -445,8 +485,10 @@
                 <th scope="col" class="h6 border-bottom-0">Validator</th>
                 <th scope="col" class="h6 border-bottom-0">Node</th>
                 <th scope="col" class="h6 border-bottom-0">Node Fee</th>
+                <th scope="col" class="h6 border-bottom-0">Deposit</th>
                 <th scope="col" class="h6 border-bottom-0">Deposit Type</th>
                 <th scope="col" class="h6 border-bottom-0">Status</th>
+                <th scope="col" class="h6 border-bottom-0">Penalties</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -464,6 +506,8 @@
                 <th scope="col" class="h6 border-bottom-0">RPL Stake</th>
                 <th scope="col" class="h6 border-bottom-0">Min RPL Stake</th>
                 <th scope="col" class="h6 border-bottom-0">Max RPL Stake</th>
+                <th scope="col" class="h6 border-bottom-0">Total Claimed</th>
+                <th scope="col" class="h6 border-bottom-0">Deposit Credit</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -512,15 +556,14 @@
                 <th scope="col" class="h6 border-bottom-0">Is Executed</th>
                 <th scope="col" class="h6 border-bottom-0">Payload</th>
                 <th scope="col" class="h6 border-bottom-0">State</th>
+                <th scope="col" class="h6 border-bottom-0">Member Votes</th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
       </div>
-      <div class="d-flex align-items-center" style="margin-top: 5rem;">
-        <ins data-revive-zoneid="1" data-revive-id="5b200397ccf8a9353bf44ef99b45268c"></ins>
-      </div>
+      <div id="r-banner" info="{{ $.Meta.Templates }}"></div>
     </div>
   {{ end }}
 {{ end }}

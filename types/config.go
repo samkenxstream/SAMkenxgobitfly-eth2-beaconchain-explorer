@@ -2,6 +2,7 @@ package types
 
 import (
 	"html/template"
+	"time"
 )
 
 // Config is a struct to hold the configuration data
@@ -20,13 +21,27 @@ type Config struct {
 		Host     string `yaml:"host" envconfig:"WRITER_DB_HOST"`
 		Port     string `yaml:"port" envconfig:"WRITER_DB_PORT"`
 	} `yaml:"writerDatabase"`
-	Chain struct {
-		Name             string `yaml:"name" envconfig:"CHAIN_NAME"`
-		GenesisTimestamp uint64 `yaml:"genesisTimestamp" envconfig:"CHAIN_GENESIS_TIMESTAMP"`
-		ConfigPath       string `yaml:"configPath" envconfig:"CHAIN_CONFIG_PATH"`
-		Config           ChainConfig
+	Bigtable struct {
+		Project  string `yaml:"project" envconfig:"BIGTABLE_PROJECT"`
+		Instance string `yaml:"instance" envconfig:"BIGTABLE_INSTANCE"`
+	} `yaml:"bigtable"`
+	LastAttestationCachePath string `yaml:"lastAttestationCachePath" envconfig:"LAST_ATTESTATION_CACHE_PATH"`
+	Chain                    struct {
+		Name                       string `yaml:"name" envconfig:"CHAIN_NAME"`
+		GenesisTimestamp           uint64 `yaml:"genesisTimestamp" envconfig:"CHAIN_GENESIS_TIMESTAMP"`
+		GenesisValidatorsRoot      string `yaml:"genesisValidatorsRoot" envconfig:"CHAIN_GENESIS_VALIDATORS_ROOT"`
+		DomainBLSToExecutionChange string `yaml:"domainBLSToExecutionChange" envconfig:"CHAIN_DOMAIN_BLS_TO_EXECUTION_CHANGE"`
+		DomainVoluntaryExit        string `yaml:"domainVoluntaryExit" envconfig:"CHAIN_DOMAIN_VOLUNTARY_EXIT"`
+		ConfigPath                 string `yaml:"configPath" envconfig:"CHAIN_CONFIG_PATH"`
+		Config                     ChainConfig
 	} `yaml:"chain"`
-	Indexer struct {
+	Eth1ErigonEndpoint  string `yaml:"eth1ErigonEndpoint" envconfig:"ETH1_ERIGON_ENDPOINT"`
+	Eth1GethEndpoint    string `yaml:"eth1GethEndpoint" envconfig:"ETH1_GETH_ENDPOINT"`
+	EtherscanAPIKey     string `yaml:"etherscanApiKey" envconfig:"ETHERSCAN_API_KEY"`
+	RedisCacheEndpoint  string `yaml:"redisCacheEndpoint" envconfig:"REDIS_CACHE_ENDPOINT"`
+	TieredCacheProvider string `yaml:"tieredCacheProvider" envconfig:"CACHE_PROVIDER"`
+	ReportServiceStatus bool   `yaml:"reportServiceStatus" envconfig:"REPORT_SERVICE_STATUS"`
+	Indexer             struct {
 		Enabled                     bool `yaml:"enabled" envconfig:"INDEXER_ENABLED"`
 		FixCanonOnStartup           bool `yaml:"fixCanonOnStartup" envconfig:"INDEXER_FIX_CANON_ON_STARTUP"`
 		FullIndexOnStartup          bool `yaml:"fullIndexOnStartup" envconfig:"INDEXER_FULL_INDEX_ON_STARTUP"`
@@ -39,7 +54,6 @@ type Config struct {
 			Type     string `yaml:"type" envconfig:"INDEXER_NODE_TYPE"`
 			PageSize int32  `yaml:"pageSize" envconfig:"INDEXER_NODE_PAGE_SIZE"`
 		} `yaml:"node"`
-		Eth1Endpoint string `yaml:"eth1Endpoint" envconfig:"INDEXER_ETH1_ENDPOINT"`
 		// Deprecated Please use Phase0 config DEPOSIT_CONTRACT_ADDRESS
 		Eth1DepositContractAddress    string `yaml:"eth1DepositContractAddress" envconfig:"INDEXER_ETH1_DEPOSIT_CONTRACT_ADDRESS"`
 		Eth1DepositContractFirstBlock uint64 `yaml:"eth1DepositContractFirstBlock" envconfig:"INDEXER_ETH1_DEPOSIT_CONTRACT_FIRST_BLOCK"`
@@ -54,6 +68,7 @@ type Config struct {
 		} `yaml:"pubkeyTagsExporter"`
 	} `yaml:"indexer"`
 	Frontend struct {
+		Debug                          bool   `yaml:"debug" envconfig:"FRONTEND_DEBUG"`
 		BeaconchainETHPoolBridgeSecret string `yaml:"beaconchainETHPoolBridgeSecret" envconfig:"FRONTEND_BEACONCHAIN_ETHPOOL_BRIDGE_SECRET"`
 		Kong                           string `yaml:"kong" envconfig:"FRONTEND_KONG"`
 		OnlyAPI                        bool   `yaml:"onlyAPI" envconfig:"FRONTEND_ONLY_API"`
@@ -63,7 +78,7 @@ type Config struct {
 		RecaptchaSiteKey               string `yaml:"recaptchaSiteKey" envconfig:"FRONTEND_RECAPTCHA_SITEKEY"`
 		RecaptchaSecretKey             string `yaml:"recaptchaSecretKey" envconfig:"FRONTEND_RECAPTCHA_SECRETKEY"`
 		Enabled                        bool   `yaml:"enabled" envconfig:"FRONTEND_ENABLED"`
-		// Imprint is deprecated place imprint file into the legal directory
+		// Imprint is deprdecated place imprint file into the legal directory
 		Imprint      string `yaml:"imprint" envconfig:"FRONTEND_IMPRINT"`
 		LegalDir     string `yaml:"legalDir" envconfig:"FRONTEND_LEGAL"`
 		SiteDomain   string `yaml:"siteDomain" envconfig:"FRONTEND_SITE_DOMAIN"`
@@ -132,30 +147,41 @@ type Config struct {
 			Timestamp uint64        `yaml:"timestamp" envconfig:"FRONTEND_COUNTDOWN_TIMESTAMP"`
 			Info      string        `yaml:"info" envconfig:"FRONTEND_COUNTDOWN_INFO"`
 		} `yaml:"countdown"`
-		PoolsUpdater struct {
-			Enabled bool `yaml:"enabled" envconfig:"FRONTEND_POOLS_UPDATER"`
-		} `yaml:"poolsUpdater"`
+		HttpReadTimeout  time.Duration `yaml:"httpReadTimeout" envconfig:"FRONTEND_HTTP_READ_TIMEOUT"`
+		HttpWriteTimeout time.Duration `yaml:"httpWriteTimeout" envconfig:"FRONTEND_HTTP_WRITE_TIMEOUT"`
+		HttpIdleTimeout  time.Duration `yaml:"httpIdleTimeout" envconfig:"FRONTEND_HTTP_IDLE_TIMEOUT"`
 	} `yaml:"frontend"`
 	Metrics struct {
 		Enabled bool   `yaml:"enabled" envconfig:"METRICS_ENABLED"`
 		Address string `yaml:"address" envconfig:"METRICS_ADDRESS"`
+		Pprof   bool   `yaml:"pprof" envconfig:"METRICS_PPROF"`
 	} `yaml:"metrics"`
 	Notifications struct {
-		Enabled                                       bool   `yaml:"enabled" envconfig:"FRONTEND_NOTIFICATIONS_ENABLED"`
-		Sender                                        bool   `yaml:"sender" envconfig:"FRONTEND_NOTIFICATIONS_ENABLED"`
-		UserDBNotifications                           bool   `yaml:"userDbNotifications" envconfig:"FRONTEND_USERDB_NOTIFICATIONS_ENABLED"`
-		FirebaseCredentialsPath                       string `yaml:"firebaseCredentialsPath" envconfig:"FRONTEND_NOTIFICATIONS_FIREBASE_CRED_PATH"`
-		ValidatorBalanceDecreasedNotificationsEnabled bool   `yaml:"validatorBalanceDecreasedNotificationsEnabled" envconfig:"FRONTEND_VALIDATOR_BALANCE_DECREASED_NOTIFICATIONS_ENABLED"`
+		Enabled                                       bool   `yaml:"enabled" envconfig:"NOTIFICATIONS_ENABLED"`
+		Sender                                        bool   `yaml:"sender" envconfig:"NOTIFICATIONS_SENDER"`
+		UserDBNotifications                           bool   `yaml:"userDbNotifications" envconfig:"USERDB_NOTIFICATIONS_ENABLED"`
+		FirebaseCredentialsPath                       string `yaml:"firebaseCredentialsPath" envconfig:"NOTIFICATIONS_FIREBASE_CRED_PATH"`
+		ValidatorBalanceDecreasedNotificationsEnabled bool   `yaml:"validatorBalanceDecreasedNotificationsEnabled" envconfig:"VALIDATOR_BALANCE_DECREASED_NOTIFICATIONS_ENABLED"`
+		PubkeyCachePath                               string `yaml:"pubkeyCachePath" envconfig:"NOTIFICATIONS_PUBKEY_CACHE_PATH"`
 	} `yaml:"notifications"`
 	SSVExporter struct {
 		Enabled bool   `yaml:"enabled" envconfig:"SSV_EXPORTER_ENABLED"`
 		Address string `yaml:"address" envconfig:"SSV_EXPORTER_ADDRESS"`
 	} `yaml:"SSVExporter"`
 	RocketpoolExporter struct {
-		Enabled                   bool   `yaml:"enabled" envconfig:"ROCKETPOOL_EXPORTER_ENABLED"`
-		StorageContractAddress    string `yaml:"storageContractAddress" envconfig:"ROCKETPOOL_EXPORTER_STORAGE_CONTRACT_ADDRESS"`
-		StorageContractFirstBlock uint64 `yaml:"storageContractFirstBlock" envconfig:"ROCKETPOOL_EXPORTER_STORAGE_CONTRACT_FIRST_BLOCK"`
+		Enabled bool `yaml:"enabled" envconfig:"ROCKETPOOL_EXPORTER_ENABLED"`
 	} `yaml:"rocketpoolExporter"`
+	MevBoostRelayExporter struct {
+		Enabled bool `yaml:"enabled" envconfig:"MEVBOOSTRELAY_EXPORTER_ENABLED"`
+	} `yaml:"mevBoostRelayExporter"`
+	Pprof struct {
+		Enabled bool   `yaml:"enabled" envconfig:"PPROF_ENABLED"`
+		Port    string `yaml:"port" envconfig:"PPROF_PORT"`
+	} `yaml:"pprof"`
+	NodeJobsProcessor struct {
+		ElEndpoint string `yaml:"elEndpoint" envconfig:"NODE_JOBS_PROCESSOR_EL_ENDPOINT"`
+		ClEndpoint string `yaml:"clEndpoint" envconfig:"NODE_JOBS_PROCESSOR_CL_ENDPOINT"`
+	} `yaml:"nodeJobsProcessor"`
 }
 
 type DatabaseConfig struct {

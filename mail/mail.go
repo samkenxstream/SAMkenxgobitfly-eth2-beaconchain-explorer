@@ -4,20 +4,16 @@ import (
 	"bytes"
 	"context"
 	"eth2-exporter/db"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
-	"html/template"
 	"net/smtp"
 	"time"
 
 	"github.com/mailgun/mailgun-go/v4"
 	"github.com/sirupsen/logrus"
 )
-
-var renderer = template.Must(template.New("faq").Funcs(utils.GetTemplateFuncs()).ParseFiles(
-	"templates/mail/layout.html",
-))
 
 type MailTemplate struct {
 	Mail   types.Email
@@ -27,6 +23,8 @@ type MailTemplate struct {
 // SendMail sends an email to the given address with the given message.
 // It will use smtp if configured otherwise it will use gunmail if configured.
 func SendHTMLMail(to, subject string, msg types.Email, attachment []types.EmailAttachment) error {
+	var renderer = templates.GetTemplate("mail/layout.html")
+
 	var err error
 	var body bytes.Buffer
 
@@ -38,11 +36,11 @@ func SendHTMLMail(to, subject string, msg types.Email, attachment []types.EmailA
 		fmt.Println("Email Attachments will not work with SMTP server")
 		err = SendMailSMTP(to, body.Bytes())
 	} else if utils.Config.Frontend.Mail.Mailgun.PrivateKey != "" {
-		err = renderer.ExecuteTemplate(&body, "layout", MailTemplate{Mail: msg, Domain: utils.Config.Frontend.SiteDomain})
-		content := string(body.Bytes())
+		_ = renderer.ExecuteTemplate(&body, "layout", MailTemplate{Mail: msg, Domain: utils.Config.Frontend.SiteDomain})
+		content := body.String()
 		err = SendMailMailgun(to, subject, content, createTextMessage(msg), attachment)
 	} else {
-		logrus.Errorf("error sending reset-email: invalid config for mail-service", err)
+		utils.LogError(nil, "error sending reset-email: invalid config for mail-service", 0)
 		err = nil
 	}
 	return err
@@ -93,7 +91,7 @@ func SendMailRateLimited(to, subject string, msg types.Email, attachment []types
 		}
 		if count >= utils.Config.Frontend.MaxMailsPerEmailPerDay {
 			timeLeft := now.Add(time.Hour * 24).Truncate(time.Hour * 24).Sub(now)
-			return &types.RateLimitError{timeLeft}
+			return &types.RateLimitError{TimeLeft: timeLeft}
 		}
 	}
 

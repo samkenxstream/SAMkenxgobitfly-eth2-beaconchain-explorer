@@ -27,152 +27,135 @@ import (
 	"strings"
 	"time"
 
+	gcp_bigtable "cloud.google.com/go/bigtable"
 	"firebase.google.com/go/messaging"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+	"github.com/rocket-pool/rocketpool-go/utils/eth"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
-func notificationsSender() {
-	// debug example
-	// var notificationsByUserID map[uint64]map[types.EventName][]types.Notification = map[uint64]map[types.EventName][]types.Notification{
-	// 	4: {
-	// 		types.ValidatorMissedAttestationEventName: {
-	// 			&validatorAttestationNotification{
-	// 				SubscriptionID:     13,
-	// 				ValidatorIndex:     12634,
-	// 				ValidatorPublicKey: "0xa8300ff090a8efb66379726d9cb04cea78770371bb8738610934928ec944fd7ffd2487860f174925069d1a0e3c9b8205",
-	// 				Epoch:              116797,
-	// 				Status:             0,
-	// 				EventName:          types.ValidatorMissedAttestationEventName,
-	// 				Slot:               3737535,
-	// 				InclusionSlot:      3737536,
-	// 				EventFilter:        "a8300ff090a8efb66379726d9cb04cea78770371bb8738610934928ec944fd7ffd2487860f174925069d1a0e3c9b8205",
-	// 			},
-	// 			&validatorAttestationNotification{
-	// 				SubscriptionID:     17,
-	// 				ValidatorIndex:     12634,
-	// 				ValidatorPublicKey: "0xa8300ff090a8efb66379726d9cb04cea78770371bb8738610934928ec944fd7ffd2487860f174925069d1a0e3c9b8205",
-	// 				Epoch:              116797,
-	// 				Status:             0,
-	// 				EventName:          types.ValidatorMissedAttestationEventName,
-	// 				Slot:               3737535,
-	// 				InclusionSlot:      3737536,
-	// 				EventFilter:        "a8300ff090a8efb66379726d9cb04cea78770371bb8738610934928ec944fd7ffd2487860f174925069d1a0e3c9b8205",
-	// 			},
-	// 			&taxReportNotification{
-	// 				SubscriptionID: 5702,
-	// 				UserID:         4,
-	// 				Epoch:          116797,
-	// 				EventFilter:    "validators=3970,51330,85425,117909,139322,140426,248973,248981&days=30&currency=eur",
-	// 			},
-	// 		},
-	// 	},
-	// }
-	// queueNotifications(notificationsByUserID, db.FrontendWriterDB)
-
-	// err := dispatchNotifications(db.FrontendWriterDB)
-	// if err != nil {
-	// 	logger.WithError(err).Error("error dispatching notifications")
-	// }
-
-	// err = garbageCollectNotificationQueue(db.FrontendWriterDB)
-	// if err != nil {
-	// 	logger.WithError(err).Errorf("error garbage collecting the notification queue")
-	// }
-
-	// return
-
-	// return
-	// make sure the lock is available
-	// lockAvailableCh := make(chan bool, 1)
-	// ctx, _ := context.WithTimeout(context.Background(), time.Second*60)
-
-	// go func() {
-	// 	// checks if the lock is available
-	// 	_, err := db.FrontendWriterDB.Exec(`SELECT pg_advisory_lock(500)`)
-	// 	if err != nil {
-	// 		logger.WithError(err).Error("error getting advisory lock")
-	// 		lockAvailableCh <- false
-	// 		return
-	// 	}
-	// 	unlocked := false
-	// 	err = db.FrontendWriterDB.Get(&unlocked, `SELECT pg_advisory_unlock(500)`)
-	// 	if err != nil {
-	// 		lockAvailableCh <- false
-	// 		logger.WithError(err).Error("error unlocking advisory lock")
-	// 		return
-	// 	}
-	// 	lockAvailableCh <- unlocked
-	// }()
-
-	// // available := <-lockAvailable
-	// // cancel()
-
-	// select {
-	// case av := <-lockAvailableCh:
-	// 	if !av {
-	// 		logger.Error("error acquiring advisory lock stopping notification sender")
-	// 		return
-	// 	}
-	// case <-ctx.Done():
-	// 	logger.Error("error acquiring advisory lock, timeout reached, stopping notification sender")
-	// 	return
-	// }
-
-	// if !available {
-	// 	logger.Error("error acquiring advisory lock stopping notification sender")
-	// 	return
-	// }
-	if utils.Config.Notifications.Sender {
-		go notificationSender()
-	}
-
+// the notificationCollector is responsible for collecting & queuing notifications
+// it is epoch based and will only collect notification for a given epoch once
+// notifications are collected in ascending epoch order
+// the epochs_notified sql table is used to keep track of already notified epochs
+// before collecting notifications several db consistency checks are done
+func notificationCollector() {
 	for {
-		// check if the explorer is not too far behind, if we set this value to close (10m) it could potentially never send any notifications
-		// if IsSyncing() {
+		latestFinalizedEpoch := LatestFinalizedEpoch()
 
-		if time.Now().Add(time.Minute * -20).After(utils.EpochToTime(LatestEpoch())) {
-			logger.Infof("skipping notifications because the explorer is syncing, latest epoch: %v", LatestEpoch())
-			time.Sleep(time.Second * 60)
+		if latestFinalizedEpoch < 4 {
+			logger.Errorf("pausing notifications until at least 4 epochs have been exported into the db")
+			time.Sleep(time.Minute)
 			continue
 		}
-		start := time.Now()
 
-		// Network DB Notifications (network related)
-		notifications := collectNotifications()
-		queueNotifications(notifications, db.FrontendWriterDB)
+		var lastNotifiedEpoch uint64
+		err := db.WriterDb.Get(&lastNotifiedEpoch, "SELECT COALESCE(MAX(epoch), 0) FROM epochs_notified")
 
-		// Network DB Notifications (user related)
-		if utils.Config.Notifications.UserDBNotifications {
-			userNotifications := collectUserDbNotifications()
-			queueNotifications(userNotifications, db.FrontendWriterDB)
+		if err != nil {
+			logger.Errorf("error retrieving last notified epoch from the db: %v", err)
+			time.Sleep(time.Minute)
+			continue
 		}
 
-		logger.WithField("notifications", len(notifications)).WithField("duration", time.Since(start)).Info("notifications completed")
-		metrics.TaskDuration.WithLabelValues("service_notifications").Observe(time.Since(start).Seconds())
-		time.Sleep(time.Second * 120)
+		logger.Infof("latest finalized epoch is %v, latest notified epoch is %v", latestFinalizedEpoch, lastNotifiedEpoch)
+
+		if latestFinalizedEpoch < lastNotifiedEpoch {
+			logger.Errorf("notification consistency error, lastest finalized epoch is lower than the last notified epoch!")
+			time.Sleep(time.Minute)
+			continue
+		}
+
+		if latestFinalizedEpoch-lastNotifiedEpoch > 5 {
+			logger.Infof("last notified epoch is more than 5 epochs behind the last finalized epoch, limiting lookback to last 5 epochs")
+			lastNotifiedEpoch = latestFinalizedEpoch - 5
+		}
+
+		for epoch := lastNotifiedEpoch + 1; epoch <= latestFinalizedEpoch; epoch++ {
+			var exported uint64
+			err := db.WriterDb.Get(&exported, "SELECT COUNT(*) FROM epochs WHERE epoch <= $1 AND epoch >= $2", epoch, epoch-3)
+			if err != nil {
+				logger.Errorf("error retrieving export status of epoch %v: %v", epoch, err)
+				ReportStatus("notification-collector", "Error", nil)
+				break
+			}
+
+			if exported != 4 {
+				logger.Errorf("epoch notification consistency error, epochs %v - %v are not all yet exported into the db (wanted %v, got %v)", epoch, epoch-3, 4, exported)
+			}
+
+			start := time.Now()
+			logger.Infof("collecting notifications for epoch %v", epoch)
+
+			// Network DB Notifications (network related)
+			notifications, err := collectNotifications(epoch)
+
+			if err != nil {
+				logger.Errorf("error collection notifications: %v", err)
+				ReportStatus("notification-collector", "Error", nil)
+				break
+			}
+
+			_, err = db.WriterDb.Exec("INSERT INTO epochs_notified VALUES ($1, NOW())", epoch)
+			if err != nil {
+				logger.Errorf("error marking notification status for epoch %v in db: %v", epoch, err)
+				ReportStatus("notification-collector", "Error", nil)
+				break
+			}
+
+			queueNotifications(notifications, db.FrontendWriterDB) // this caused the collected notifications to be queued and sent
+
+			// Network DB Notifications (user related, must only run on one instance ever!!!!)
+			if utils.Config.Notifications.UserDBNotifications {
+				userNotifications, err := collectUserDbNotifications(epoch)
+				if err != nil {
+					logger.Errorf("error collection user db notifications: %v", err)
+					ReportStatus("notification-collector", "Error", nil)
+					time.Sleep(time.Second * 120)
+					continue
+				}
+
+				queueNotifications(userNotifications, db.FrontendWriterDB)
+			}
+
+			logger.
+				WithField("notifications", len(notifications)).
+				WithField("duration", time.Since(start)).
+				WithField("epoch", epoch).
+				Info("notifications completed")
+
+			metrics.TaskDuration.WithLabelValues("service_notifications").Observe(time.Since(start).Seconds())
+		}
+
+		ReportStatus("notification-collector", "Running", nil)
+		time.Sleep(time.Second * 10)
 	}
 }
 
 func notificationSender() {
 	for {
 		start := time.Now()
-		ctx, _ := context.WithTimeout(context.Background(), time.Second*30)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*300)
 
 		conn, err := db.FrontendReaderDB.Conn(ctx)
 		if err != nil {
 			logger.WithError(err).Error("error creating connection")
+			cancel()
 			continue
 		}
 
 		_, err = conn.ExecContext(ctx, `SELECT pg_advisory_lock(500)`)
 		if err != nil {
-			logger.WithError(err).Error("error getting advisory lock from db")
+			logger.WithError(err).Errorf("error getting advisory lock from db")
 
 			conn.Close()
 			if err != nil {
-				logger.WithError(err).Error("error returning connection to connection pool")
+				logger.WithError(err).Warn("error returning connection to connection pool (advisory lock)")
 			}
+			cancel()
 			continue
 		}
 
@@ -192,11 +175,13 @@ func notificationSender() {
 		unlocked := false
 		rows, err := conn.QueryContext(ctx, `SELECT pg_advisory_unlock(500)`)
 		if err != nil {
-			logger.WithError(err).Error("error executing advisory unlock")
-			conn.Close()
+			logger.WithError(err).Errorf("error executing advisory unlock")
+
+			err = conn.Close()
 			if err != nil {
-				logger.WithError(err).Error("error returning connection to connection pool")
+				logger.WithError(err).Warn("error returning connection to connection pool (advisory unlock)")
 			}
+			cancel()
 			continue
 		}
 
@@ -205,158 +190,214 @@ func notificationSender() {
 		}
 
 		if !unlocked {
-			logger.Error("error releasing advisory lock unlocked: ", unlocked)
+			utils.LogError(nil, fmt.Errorf("error releasing advisory lock unlocked: %v", unlocked), 0)
 		}
 
 		conn.Close()
 		if err != nil {
-			logger.WithError(err).Error("error returning connection to connection pool")
+			logger.Warn("error returning connection to connection pool")
 		}
+		cancel()
 
+		ReportStatus("notification-sender", "Running", nil)
 		time.Sleep(time.Second * 30)
 	}
 }
 
-func collectNotifications() map[uint64]map[types.EventName][]types.Notification {
+func collectNotifications(epoch uint64) (map[uint64]map[types.EventName][]types.Notification, error) {
 	notificationsByUserID := map[uint64]map[types.EventName][]types.Notification{}
 	start := time.Now()
 	var err error
-	// if utils.Config.Notifications.ValidatorBalanceDecreasedNotificationsEnabled {
-	// 	err = collectValidatorBalanceDecreasedNotifications(notificationsByUserID)
-	// 	if err != nil {
-	// 		logger.Errorf("error collecting validator_balance_decreased notifications: %v", err)
-	// 	}
-	// }
+	var dbIsCoherent bool
+
+	err = db.WriterDb.Get(&dbIsCoherent, `
+		select 
+			not (array[false] && array_agg(is_coherent)) as is_coherent
+		from (
+			select 
+				epoch - 1 = lead(epoch) over (order by epoch desc) as is_coherent
+			from epochs
+			order by epoch desc 
+			limit 2^14
+		) coherency`)
+
+	if err != nil {
+		logger.Errorf("failed to do epochs table coherence check, aborting: %v", err)
+		return nil, err
+	}
+	if !dbIsCoherent {
+		logger.Errorf("epochs coherence check failed, aborting.")
+		return nil, fmt.Errorf("epochs coherence check failed, aborting")
+	}
+
 	logger.Infof("Started collecting notifications")
-	err = collectValidatorGotSlashedNotifications(notificationsByUserID)
-	if err != nil {
-		logger.Errorf("error collecting validator_got_slashed notifications: %v", err)
-		metrics.Errors.WithLabelValues("notifications_collect_validator_got_slashed").Inc()
-	}
-	logger.Infof("Collecting validator got slashed notifications took: %v\n", time.Since(start))
 
-	// executed Proposals
-	err = collectBlockProposalNotifications(notificationsByUserID, 1, types.ValidatorExecutedProposalEventName)
+	err = collectAttestationAndOfflineValidatorNotifications(notificationsByUserID, 0, epoch)
 	if err != nil {
-		logger.Errorf("error collecting validator_proposal_submitted notifications: %v", err)
-		metrics.Errors.WithLabelValues("notifications_collect_executed_block_proposal").Inc()
-	}
-	logger.Infof("Collecting block proposal proposed notifications took: %v\n", time.Since(start))
-
-	// Missed proposals
-	err = collectBlockProposalNotifications(notificationsByUserID, 2, types.ValidatorMissedProposalEventName)
-	if err != nil {
-		logger.Errorf("error collecting validator_proposal_missed notifications: %v", err)
-		metrics.Errors.WithLabelValues("notifications_collect_missed_block_proposal").Inc()
-	}
-	logger.Infof("Collecting block proposal missed notifications took: %v\n", time.Since(start))
-
-	// Missed attestations
-	err = collectAttestationNotifications(notificationsByUserID, 0, types.ValidatorMissedAttestationEventName)
-	if err != nil {
-		logger.Errorf("error collecting validator_attestation_missed notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_missed_attestation").Inc()
+		return nil, fmt.Errorf("error collecting validator_attestation_missed notifications: %v", err)
 	}
-	logger.Infof("Collecting attestation notifications took: %v\n", time.Since(start))
+	logger.Infof("collecting attestation & offline notifications took: %v\n", time.Since(start))
 
-	// Network liveness
+	err = collectBlockProposalNotifications(notificationsByUserID, 1, types.ValidatorExecutedProposalEventName, epoch)
+	if err != nil {
+		metrics.Errors.WithLabelValues("notifications_collect_executed_block_proposal").Inc()
+		return nil, fmt.Errorf("error collecting validator_proposal_submitted notifications: %v", err)
+	}
+	logger.Infof("collecting block proposal proposed notifications took: %v\n", time.Since(start))
+
+	err = collectBlockProposalNotifications(notificationsByUserID, 2, types.ValidatorMissedProposalEventName, epoch)
+	if err != nil {
+		metrics.Errors.WithLabelValues("notifications_collect_missed_block_proposal").Inc()
+		return nil, fmt.Errorf("error collecting validator_proposal_missed notifications: %v", err)
+	}
+	logger.Infof("collecting block proposal missed notifications took: %v\n", time.Since(start))
+
+	err = collectValidatorGotSlashedNotifications(notificationsByUserID, epoch)
+	if err != nil {
+		metrics.Errors.WithLabelValues("notifications_collect_validator_got_slashed").Inc()
+		return nil, fmt.Errorf("error collecting validator_got_slashed notifications: %v", err)
+	}
+	logger.Infof("collecting validator got slashed notifications took: %v\n", time.Since(start))
+
+	err = collectWithdrawalNotifications(notificationsByUserID, epoch)
+	if err != nil {
+		metrics.Errors.WithLabelValues("notifications_collect_validator_withdrawal").Inc()
+		return nil, fmt.Errorf("error collecting withdrawal notifications: %v", err)
+	}
+	logger.Infof("collecting withdrawal notifications took: %v\n", time.Since(start))
+
 	err = collectNetworkNotifications(notificationsByUserID, types.NetworkLivenessIncreasedEventName)
 	if err != nil {
-		logger.Errorf("error collecting network notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_network").Inc()
+		return nil, fmt.Errorf("error collecting network notifications: %v", err)
 	}
-	logger.Infof("Collecting collecting network notifications took: %v\n", time.Since(start))
+	logger.Infof("collecting network notifications took: %v\n", time.Since(start))
 
-	// Rocketpool fee comission alert
-	err = collectRocketpoolComissionNotifications(notificationsByUserID, types.RocketpoolCommissionThresholdEventName)
-	if err != nil {
-		logger.Errorf("error collecting rocketpool commision: %v", err)
-		metrics.Errors.WithLabelValues("notifications_collect_rocketpool_comission").Inc()
+	// Rocketpool
+	{
+		var ts int64
+		err = db.ReaderDb.Get(&ts, `SELECT id FROM rocketpool_network_stats LIMIT 1;`)
+
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				logger.Infof("skipped the collecting of rocketpool notifications, because rocketpool_network_stats is empty")
+			} else {
+				metrics.Errors.WithLabelValues("notifications_collect_rocketpool_notifications").Inc()
+				return nil, fmt.Errorf("error collecting rocketpool notifications: %v", err)
+			}
+		} else {
+			err = collectRocketpoolComissionNotifications(notificationsByUserID, types.RocketpoolCommissionThresholdEventName)
+			if err != nil {
+				metrics.Errors.WithLabelValues("notifications_collect_rocketpool_comission").Inc()
+				return nil, fmt.Errorf("error collecting rocketpool commission: %v", err)
+			}
+			logger.Infof("collecting rocketpool commissions took: %v\n", time.Since(start))
+
+			err = collectRocketpoolRewardClaimRoundNotifications(notificationsByUserID, types.RocketpoolNewClaimRoundStartedEventName)
+			if err != nil {
+				metrics.Errors.WithLabelValues("notifications_collect_rocketpool_reward_claim").Inc()
+				return nil, fmt.Errorf("error collecting new rocketpool claim round: %v", err)
+			}
+			logger.Infof("collecting rocketpool claim round took: %v\n", time.Since(start))
+
+			err = collectRocketpoolRPLCollateralNotifications(notificationsByUserID, types.RocketpoolColleteralMaxReached, epoch)
+			if err != nil {
+				metrics.Errors.WithLabelValues("notifications_collect_rocketpool_rpl_collateral_max_reached").Inc()
+				return nil, fmt.Errorf("error collecting rocketpool max collateral: %v", err)
+			}
+			logger.Infof("collecting rocketpool max collateral took: %v\n", time.Since(start))
+
+			err = collectRocketpoolRPLCollateralNotifications(notificationsByUserID, types.RocketpoolColleteralMinReached, epoch)
+			if err != nil {
+				metrics.Errors.WithLabelValues("notifications_collect_rocketpool_rpl_collateral_min_reached").Inc()
+				return nil, fmt.Errorf("error collecting rocketpool min collateral: %v", err)
+			}
+			logger.Infof("collecting rocketpool min collateral took: %v\n", time.Since(start))
+		}
 	}
-	logger.Infof("Collecting collecting rocketpool commissions took: %v\n", time.Since(start))
 
-	err = collectRocketpoolRewardClaimRoundNotifications(notificationsByUserID, types.RocketpoolNewClaimRoundStartedEventName)
+	err = collectSyncCommittee(notificationsByUserID, types.SyncCommitteeSoon, epoch)
 	if err != nil {
-		logger.Errorf("error collecting new rocketpool claim round: %v", err)
-		metrics.Errors.WithLabelValues("notifications_collect_rocketpool_reward_claim").Inc()
-	}
-	logger.Infof("Collecting collecting rocketpool claim round took: %v\n", time.Since(start))
-
-	err = collectRocketpoolRPLCollateralNotifications(notificationsByUserID, types.RocketpoolColleteralMaxReached)
-	if err != nil {
-		logger.Errorf("error collecting rocketpool max colleteral: %v", err)
-		metrics.Errors.WithLabelValues("notifications_collect_rocketpool_rpl_collateral_max_reached").Inc()
-	}
-	logger.Infof("Collecting collecting rocketpool max collateral took: %v\n", time.Since(start))
-
-	err = collectRocketpoolRPLCollateralNotifications(notificationsByUserID, types.RocketpoolColleteralMinReached)
-	if err != nil {
-		logger.Errorf("error collecting rocketpool min colleteral: %v", err)
-		metrics.Errors.WithLabelValues("notifications_collect_rocketpool_rpl_collateral_min_reached").Inc()
-	}
-	logger.Infof("Collecting collecting rocketpool min collateral took: %v\n", time.Since(start))
-
-	err = collectSyncCommittee(notificationsByUserID, types.SyncCommitteeSoon)
-	if err != nil {
-		logger.Errorf("error collecting sync committee: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_sync_committee").Inc()
+		return nil, fmt.Errorf("error collecting sync committee: %v", err)
 	}
-	logger.Infof("Collecting collecting sync committee took: %v\n", time.Since(start))
+	logger.Infof("collecting sync committee took: %v\n", time.Since(start))
 
-	return notificationsByUserID
+	return notificationsByUserID, nil
 }
 
-func collectUserDbNotifications() map[uint64]map[types.EventName][]types.Notification {
+func collectUserDbNotifications(epoch uint64) (map[uint64]map[types.EventName][]types.Notification, error) {
 	notificationsByUserID := map[uint64]map[types.EventName][]types.Notification{}
 	var err error
 
 	// Monitoring (premium): machine offline
-	err = collectMonitoringMachineOffline(notificationsByUserID)
+	err = collectMonitoringMachineOffline(notificationsByUserID, epoch)
 	if err != nil {
-		logger.Errorf("error collecting Eth client offline notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_monitoring_machine_offline").Inc()
+		return nil, fmt.Errorf("error collecting Eth client offline notifications: %v", err)
 	}
 
 	// Monitoring (premium): disk full warnings
-	err = collectMonitoringMachineDiskAlmostFull(notificationsByUserID)
+	err = collectMonitoringMachineDiskAlmostFull(notificationsByUserID, epoch)
 	if err != nil {
-		logger.Errorf("error collecting Eth client disk full notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_monitoring_machine_disk_almost_full").Inc()
+		return nil, fmt.Errorf("error collecting Eth client disk full notifications: %v", err)
 	}
 
 	// Monitoring (premium): cpu load
-	err = collectMonitoringMachineCPULoad(notificationsByUserID)
+	err = collectMonitoringMachineCPULoad(notificationsByUserID, epoch)
 	if err != nil {
-		logger.Errorf("error collecting Eth client cpu notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_monitoring_machine_cpu_load").Inc()
+		return nil, fmt.Errorf("error collecting Eth client cpu notifications: %v", err)
 	}
 
 	// Monitoring (premium): ram
-	err = collectMonitoringMachineMemoryUsage(notificationsByUserID)
+	err = collectMonitoringMachineMemoryUsage(notificationsByUserID, epoch)
 	if err != nil {
-		logger.Errorf("error collecting Eth client memory notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_monitoring_machine_memory_usage").Inc()
+		return nil, fmt.Errorf("error collecting Eth client memory notifications: %v", err)
 	}
 
 	// New ETH clients
 	err = collectEthClientNotifications(notificationsByUserID, types.EthClientUpdateEventName)
 	if err != nil {
-		logger.Errorf("error collecting Eth client notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_eth_client").Inc()
+		return nil, fmt.Errorf("error collecting Eth client notifications: %v", err)
 	}
 
 	//Tax Report
 	err = collectTaxReportNotificationNotifications(notificationsByUserID, types.TaxReportEventName)
 	if err != nil {
-		logger.Errorf("error collecting tax report notifications: %v", err)
 		metrics.Errors.WithLabelValues("notifications_collect_tax_report").Inc()
+		return nil, fmt.Errorf("error collecting tax report notifications: %v", err)
 	}
 
-	return notificationsByUserID
+	return notificationsByUserID, nil
 }
 
 func queueNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, useDB *sqlx.DB) {
 	subByEpoch := map[uint64][]uint64{}
+
+	// prevent multiple events being sent with the same subscription id
+	for user, notifications := range notificationsByUserID {
+		for eventType, events := range notifications {
+			filteredEvents := make([]types.Notification, 0)
+
+			for _, ev := range events {
+				isDuplicate := false
+				for _, fe := range filteredEvents {
+					if fe.GetSubscriptionID() == ev.GetSubscriptionID() {
+						isDuplicate = true
+					}
+				}
+				if !isDuplicate {
+					filteredEvents = append(filteredEvents, ev)
+				}
+			}
+			notificationsByUserID[user][eventType] = filteredEvents
+		}
+	}
 
 	err := queueEmailNotifications(notificationsByUserID, useDB)
 	if err != nil {
@@ -393,10 +434,36 @@ func queueNotifications(notificationsByUserID map[uint64]map[types.EventName][]t
 			metrics.Errors.WithLabelValues("notifications_updating_sent_time").Inc()
 		}
 	}
+	// update internal state of subscriptions
+	stateToSub := make(map[string]map[uint64]bool, 0)
 
-	// 	// sendPushNotifications(notificationsByUserID, useDB)
-	// 	// sendWebhookNotifications(notificationsByUserID, useDB)
+	for _, notificationMap := range notificationsByUserID { // _ => user
+		for _, notifications := range notificationMap { // _ => eventname
+			for _, notification := range notifications { // _ => index
+				state := notification.GetLatestState()
+				if state == "" {
+					continue
+				}
+				if _, exists := stateToSub[state]; !exists {
+					stateToSub[state] = make(map[uint64]bool, 0)
+				}
+				if _, exists := stateToSub[state][notification.GetSubscriptionID()]; !exists {
+					stateToSub[state][notification.GetSubscriptionID()] = true
+				}
+			}
+		}
+	}
 
+	for state, subs := range stateToSub {
+		subArray := make([]int64, 0)
+		for subID := range subs {
+			subArray = append(subArray, int64(subID))
+		}
+		_, err := db.FrontendWriterDB.Exec(`UPDATE users_subscriptions SET internal_state = $1 WHERE id = ANY($2)`, state, pq.Int64Array(subArray))
+		if err != nil {
+			logger.Errorf("failed to update internal state of notifcations: %v", err)
+		}
+	}
 }
 
 func dispatchNotifications(useDB *sqlx.DB) error {
@@ -426,25 +493,15 @@ func dispatchNotifications(useDB *sqlx.DB) error {
 
 // garbageCollectNotificationQueue deletes entries from the notification queue that have been processed
 func garbageCollectNotificationQueue(useDB *sqlx.DB) error {
-	tx, err := useDB.Beginx()
-	if err != nil {
-		return fmt.Errorf("error beginning transaction")
-	}
-	defer tx.Rollback()
 
-	rows, err := tx.Exec(`DELETE FROM notification_queue where (sent < now() - INTERVAL '30 minutes') OR (created < now() - INTERVAL '1 hour')`)
+	rows, err := useDB.Exec(`DELETE FROM notification_queue where (sent < now() - INTERVAL '30 minutes') OR (created < now() - INTERVAL '1 hour')`)
 	if err != nil {
 		return fmt.Errorf("error deleting from notification_queue %w", err)
 	}
 
 	rowsAffected, _ := rows.RowsAffected()
 
-	logger.Infof("Deleting %v rows from the notification_queue", rowsAffected)
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("error committing transaction")
-	}
+	logger.Infof("Deleted %v rows from the notification_queue", rowsAffected)
 
 	return nil
 }
@@ -452,7 +509,7 @@ func garbageCollectNotificationQueue(useDB *sqlx.DB) error {
 func getNetwork() string {
 	domainParts := strings.Split(utils.Config.Frontend.SiteDomain, ".")
 	if len(domainParts) >= 3 {
-		return fmt.Sprintf("%s: ", strings.Title(domainParts[0]))
+		return fmt.Sprintf("%s: ", cases.Title(language.English).String(domainParts[0]))
 	}
 	return ""
 }
@@ -466,7 +523,7 @@ func queuePushNotification(notificationsByUserID map[uint64]map[types.EventName]
 	tokensByUserID, err := db.GetUserPushTokenByIds(userIDs)
 	if err != nil {
 		metrics.Errors.WithLabelValues("notifications_send_push_notifications").Inc()
-		return fmt.Errorf("error when sending push-notificaitons: could not get tokens: %w", err)
+		return fmt.Errorf("error when sending push-notifications: could not get tokens: %w", err)
 	}
 
 	for userID, userNotifications := range notificationsByUserID {
@@ -506,27 +563,13 @@ func queuePushNotification(notificationsByUserID map[uint64]map[types.EventName]
 				}
 			}
 
-			tx, err := useDB.Beginx()
-			if err != nil {
-				logger.WithError(err).Error("error beginning transaction")
-				return
-			}
-
 			transitPushContent := types.TransitPushContent{
 				Messages: batch,
 			}
 
-			_, err = tx.Exec(`INSERT INTO notification_queue (created, channel, content) VALUES ($1, 'push', $2)`, time.Now(), transitPushContent)
+			_, err = useDB.Exec(`INSERT INTO notification_queue (created, channel, content) VALUES ($1, 'push', $2)`, time.Now(), transitPushContent)
 			if err != nil {
 				logger.WithError(err).Errorf("error writing transit push notification to db")
-				tx.Rollback()
-				return
-			}
-
-			err = tx.Commit()
-			if err != nil {
-				logger.WithError(err).Error("error committing transaction")
-				tx.Rollback()
 				return
 			}
 		}(userTokens, userNotifications)
@@ -550,29 +593,28 @@ func sendPushNotifications(useDB *sqlx.DB) error {
 
 	logger.Infof("processing %v push notifications", len(notificationQueueItem))
 
+	batchSize := 500
 	for _, n := range notificationQueueItem {
-		tx, err := useDB.Beginx()
-		if err != nil {
-			return fmt.Errorf("error beginning transaction")
-		}
-		_, err = notify.SendPushBatch(n.Content.Messages)
-		if err != nil {
-			metrics.Errors.WithLabelValues("notifications_send_push_batch").Inc()
-			logger.WithError(err).Error("error sending firebase batch job")
-		} else {
-			metrics.NotificationsSent.WithLabelValues("push", "200").Add(float64(len(n.Content.Messages)))
-		}
+		for b := 0; b < len(n.Content.Messages); b += batchSize {
+			start := b
+			end := b + batchSize
+			if len(n.Content.Messages) < end {
+				end = len(n.Content.Messages)
+			}
 
-		_, err = tx.Exec(`UPDATE notification_queue set sent = now() where id = $1`, n.Id)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("error updating sent status for push notification with id: %v, err: %w", n.Id, err)
+			err = notify.SendPushBatch(n.Content.Messages[start:end])
+			if err != nil {
+				metrics.Errors.WithLabelValues("notifications_send_push_batch").Inc()
+				logger.WithError(err).Error("error sending firebase batch job")
+			} else {
+				metrics.NotificationsSent.WithLabelValues("push", "200").Add(float64(len(n.Content.Messages)))
+			}
+
+			_, err = useDB.Exec(`UPDATE notification_queue set sent = now() where id = $1`, n.Id)
+			if err != nil {
+				return fmt.Errorf("error updating sent status for push notification with id: %v, err: %w", n.Id, err)
+			}
 		}
-		err = tx.Commit()
-		if err != nil {
-			return fmt.Errorf("error committing transaction")
-		}
-		tx.Rollback()
 	}
 	return nil
 }
@@ -591,7 +633,7 @@ func queueEmailNotifications(notificationsByUserID map[uint64]map[types.EventNam
 	for userID, userNotifications := range notificationsByUserID {
 		userEmail, exists := emailsByUserID[userID]
 		if !exists {
-			logger.Errorf("email notification skipping user %v", userID)
+			logger.Warnf("email notification skipping user %v", userID)
 			// we don't need this metrics as users can now deactivate email notifications and it would increment the counter
 			// metrics.Errors.WithLabelValues("notifications_mail_not_found").Inc()
 			continue
@@ -615,6 +657,10 @@ func queueEmailNotifications(notificationsByUserID map[uint64]map[types.EventNam
 			attachments := []types.EmailAttachment{}
 
 			var msg types.Email
+
+			if utils.Config.Chain.Name != "mainnet" {
+				msg.Body += template.HTML(fmt.Sprintf("<b>Notice: This email contains notifications for the %s network!</b><br>", utils.Config.Chain.Name))
+			}
 
 			for event, ns := range userNotifications {
 				if len(msg.Body) > 0 {
@@ -690,12 +736,6 @@ func queueEmailNotifications(notificationsByUserID map[uint64]map[types.EventNam
 				}
 			}
 
-			tx, err := useDB.Beginx()
-			if err != nil {
-				logger.WithError(err).Error("error beginning transaction")
-				return
-			}
-
 			// msg.Body += template.HTML(fmt.Sprintf("<br>Best regards<br>\n%s", utils.Config.Frontend.SiteDomain))
 			msg.SubscriptionManageURL = template.HTML(fmt.Sprintf(`<a href="%v" style="color: white" onMouseOver="this.style.color='#F5B498'" onMouseOut="this.style.color='#FFFFFF'">Manage</a>`, "https://"+utils.Config.Frontend.SiteDomain+"/user/notifications"))
 
@@ -706,17 +746,9 @@ func queueEmailNotifications(notificationsByUserID map[uint64]map[types.EventNam
 				Attachments: attachments,
 			}
 
-			_, err = tx.Exec(`INSERT INTO notification_queue (created, channel, content) VALUES ($1, 'email', $2)`, time.Now(), transitEmailContent)
+			_, err = useDB.Exec(`INSERT INTO notification_queue (created, channel, content) VALUES ($1, 'email', $2)`, time.Now(), transitEmailContent)
 			if err != nil {
 				logger.WithError(err).Errorf("error writing transit email to db")
-				tx.Rollback()
-			}
-
-			err = tx.Commit()
-			if err != nil {
-				logger.WithError(err).Error("error committing transaction")
-				tx.Rollback()
-				return
 			}
 		}(userEmail, userNotifications)
 	}
@@ -740,10 +772,6 @@ func sendEmailNotifications(useDb *sqlx.DB) error {
 	logger.Infof("processing %v email notifications", len(notificationQueueItem))
 
 	for _, n := range notificationQueueItem {
-		tx, err := useDb.Beginx()
-		if err != nil {
-			return fmt.Errorf("error beginning transaction")
-		}
 		err = mail.SendMailRateLimited(n.Content.Address, n.Content.Subject, n.Content.Email, n.Content.Attachments)
 		if err != nil {
 			if !strings.Contains(err.Error(), "rate limit has been exceeded") {
@@ -767,15 +795,9 @@ func sendEmailNotifications(useDb *sqlx.DB) error {
 			// 	return fmt.Errorf("error sending notification-email: %w", err)
 			// }
 		}
-		_, err = tx.Exec(`UPDATE notification_queue set sent = now() where id = $1`, n.Id)
+		_, err = useDb.Exec(`UPDATE notification_queue set sent = now() where id = $1`, n.Id)
 		if err != nil {
-			tx.Rollback()
 			return fmt.Errorf("error updating sent status for email notification with id: %v, err: %w", n.Id, err)
-		}
-		err = tx.Commit()
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("error committing transaction")
 		}
 	}
 	return nil
@@ -804,6 +826,9 @@ func queueWebhookNotifications(notificationsByUserID map[uint64]map[types.EventN
 		if err != nil {
 			return fmt.Errorf("error quering users_webhooks, err: %w", err)
 		}
+		// webhook => [] notifications
+		discordNotifMap := make(map[uint64][]types.TransitDiscordContent)
+		notifs := make([]types.TransitWebhook, 0)
 		// send the notifications to each registered webhook
 		for _, w := range webhooks {
 			for event, notifications := range userNotifications {
@@ -816,14 +841,45 @@ func queueWebhookNotifications(notificationsByUserID map[uint64]map[types.EventN
 					}
 				}
 				if eventSubscribed {
+					if len(notifications) > 0 {
+						// reset Retries
+						if w.Retries > 5 && w.LastSent.Valid && w.LastSent.Time.Add(time.Hour).Before(time.Now()) {
+							_, err = useDB.Exec(`UPDATE users_webhooks SET retries = 0 WHERE id = $1;`, w.ID)
+							if err != nil {
+								logger.WithError(err).Errorf("error updating users_webhooks table; setting retries to zero")
+								continue
+							}
+						} else if w.Retries > 5 && !w.LastSent.Valid {
+							logger.Warn("error webhook has more than 5 retries and does not have a valid last_sent timestamp")
+							continue
+						}
+
+						if w.Retries >= 5 {
+							// early return
+							continue
+						}
+					}
+
 					for _, n := range notifications {
-						var content interface{}
-						channel := w.Destination.String
 						if w.Destination.Valid && w.Destination.String == "webhook_discord" {
+							if _, exists := discordNotifMap[w.ID]; !exists {
+								discordNotifMap[w.ID] = make([]types.TransitDiscordContent, 0)
+							}
+							l_notifs := len(discordNotifMap[w.ID])
+							if l_notifs == 0 || len(discordNotifMap[w.ID][l_notifs-1].DiscordRequest.Embeds) >= 10 {
+								discordNotifMap[w.ID] = append(discordNotifMap[w.ID], types.TransitDiscordContent{
+									Webhook: w,
+									DiscordRequest: types.DiscordReq{
+										Username: utils.Config.Frontend.SiteDomain,
+									},
+								})
+								l_notifs++
+							}
+
 							fields := []types.DiscordEmbedField{
 								{
 									Name:   "Epoch",
-									Value:  fmt.Sprintf("[%v](https://%s/%[1]v)", n.GetEpoch(), utils.Config.Frontend.SiteDomain+"/epoch"),
+									Value:  fmt.Sprintf("[%[1]v](https://%[2]s/%[1]v)", n.GetEpoch(), utils.Config.Frontend.SiteDomain+"/epoch"),
 									Inline: false,
 								},
 							}
@@ -836,106 +892,51 @@ func queueWebhookNotifications(notificationsByUserID map[uint64]map[types.EventN
 										Inline: false,
 									})
 							}
-
-							embeds := []types.DiscordEmbed{
-								{
-									Type:        "rich",
-									Color:       "16745472",
-									Description: n.GetInfoMarkdown(),
-									Title:       n.GetTitle(),
-									Fields:      fields,
-								},
-							}
-
-							// buttons := []types.DiscordComponentButton{
-							// 	{
-							// 		Style:    5,
-							// 		Label:    "Epoch",
-							// 		URL:      fmt.Sprintf("https://"+utils.Config.Frontend.SiteDomain+"/epoch/%v", n.GetEpoch()),
-							// 		Disabled: false,
-							// 		CustomID: "epoch_link",
-							// 		Type:     2,
-							// 	},
-							// }
-
-							// if n.GetEventName() == types.ValidatorMissedAttestationEventName {
-							// 	v, ok := n.(*validatorAttestationNotification)
-							// 	if ok {
-							// 		buttons = append(buttons, types.DiscordComponentButton{
-							// 			Style:    5,
-							// 			Label:    "Slot",
-							// 			CustomID: "slot_link",
-							// 			URL:      fmt.Sprintf("https://"+utils.Config.Frontend.SiteDomain+"/block/%v", v.Slot),
-							// 			Disabled: false,
-							// 			Type:     2,
-							// 		})
-							// 	}
-							// }
-
-							// if strings.HasPrefix(string(n.GetEventName()), "validator") {
-							// 	buttons = append(buttons, types.DiscordComponentButton{
-							// 		Style:    5,
-							// 		CustomID: "validator_link",
-							// 		Label:    "Validator",
-							// 		URL:      fmt.Sprintf("https://"+utils.Config.Frontend.SiteDomain+"/validator/%v", n.GetEventFilter()),
-							// 		Disabled: false,
-							// 		Type:     2,
-							// 	})
-							// }
-
-							// components := []types.DiscordComponent{
-							// 	{
-							// 		Type:       1,
-							// 		Components: buttons,
-							// 	},
-							// }
-							// n.GetEventName()
-							req := types.DiscordReq{
-								Username: utils.Config.Frontend.SiteDomain,
-								Embeds:   embeds,
-								//Components: components,
-							}
-
-							content = types.TransitDiscordContent{
-								Webhook:        w,
-								DiscordRequest: req,
-							}
+							discordNotifMap[w.ID][l_notifs-1].DiscordRequest.Embeds = append(discordNotifMap[w.ID][l_notifs-1].DiscordRequest.Embeds, types.DiscordEmbed{
+								Type:        "rich",
+								Color:       "16745472",
+								Description: n.GetInfoMarkdown(),
+								Title:       n.GetTitle(),
+								Fields:      fields,
+							})
 						} else {
-							content = types.TransitWebhookContent{
-								Webhook: w,
-								Event: types.WebhookEvent{
-									Network:     utils.GetNetwork(),
-									Name:        string(n.GetEventName()),
-									Title:       n.GetTitle(),
-									Description: n.GetInfo(false),
-									Epoch:       n.GetEpoch(),
-									Target:      n.GetEventFilter(),
+							notifs = append(notifs, types.TransitWebhook{
+								Channel: w.Destination.String,
+								Content: types.TransitWebhookContent{
+									Webhook: w,
+									Event: types.WebhookEvent{
+										Network:     utils.GetNetwork(),
+										Name:        string(n.GetEventName()),
+										Title:       n.GetTitle(),
+										Description: n.GetInfo(false),
+										Epoch:       n.GetEpoch(),
+										Target:      n.GetEventFilter(),
+									},
 								},
-							}
+							})
 						}
-						// reset Retries
-						if w.Retries > 5 && w.LastSent.Valid && w.LastSent.Time.Add(time.Hour).Before(time.Now()) {
-							_, err = useDB.Exec(`UPDATE users_webhooks SET retries = 0 WHERE id = $1;`, w.ID)
-							if err != nil {
-								logger.WithError(err).Errorf("error updating users_webhooks table; setting retries to zero")
-								continue
-							}
-						} else if w.Retries > 5 && !w.LastSent.Valid {
-							logger.Error("error webhook has more than 5 retries and does not have a valid last_sent timestamp")
-							continue
-						}
-
-						if w.Retries <= 5 {
-							_, err = useDB.Exec(`INSERT INTO notification_queue (created, channel, content) VALUES (now(), $1, $2);`, channel, content)
-							if err != nil {
-								logger.WithError(err).Errorf("error inserting into webhooks_queue")
-								continue
-							} else {
-								metrics.NotificationsQueued.WithLabelValues(channel, string(event)).Inc()
-							}
-						}
-
 					}
+				}
+			}
+		}
+		// process notifs
+		for _, n := range notifs {
+			_, err = useDB.Exec(`INSERT INTO notification_queue (created, channel, content) VALUES (now(), $1, $2);`, n.Channel, n.Content)
+			if err != nil {
+				logger.WithError(err).Errorf("error inserting into webhooks_queue")
+			} else {
+				metrics.NotificationsQueued.WithLabelValues(n.Channel, n.Content.Event.Name).Inc()
+			}
+		}
+		// process discord notifs
+		for _, dNotifs := range discordNotifMap {
+			for _, n := range dNotifs {
+				_, err = useDB.Exec(`INSERT INTO notification_queue (created, channel, content) VALUES (now(), 'webhook_discord', $1);`, n)
+				if err != nil {
+					logger.WithError(err).Errorf("error inserting into webhooks_queue (discord)")
+					continue
+				} else {
+					metrics.NotificationsQueued.WithLabelValues("webhook_discord", "multi").Inc()
 				}
 			}
 		}
@@ -1059,296 +1060,206 @@ func sendDiscordNotifications(useDB *sqlx.DB) error {
 	client := &http.Client{Timeout: time.Second * 30}
 
 	logger.Infof("processing %v discord webhook notifications", len(notificationQueueItem))
-	// now := time.Now()
+	webhookMap := make(map[uint64]types.UserWebhook)
+
+	notifMap := make(map[uint64][]types.TransitDiscord)
+	// generate webhook id => discord req
+	// while mapping. aggregate embeds while doing so, up to 10 per req can be sent
 	for _, n := range notificationQueueItem {
-
-		// rate limit for 1 hour after 5 retries
+		// purge the event from existence if the retry counter is over 5
 		if n.Content.Webhook.Retries > 5 {
-			// if n.Content.Webhook.LastSent.Valid && n.Content.Webhook.LastSent.Time.Add(time.Hour*1).Before(now) {
-			// 	_, err = useDB.Exec(`UPDATE users_webhooks SET retries = 0 WHERE id = $1;`, n.Content.Webhook.ID)
-			// 	if err != nil {
-			// 		logger.WithError(err).Errorf("error updating users_webhooks table; resetting retries")
-			// 		continue
-			// 	}
-			// } else {
-			_, err := db.FrontendWriterDB.Exec(`DELETE FROM notification_queue where id = $1`, n.Id)
-			if err != nil {
-				return fmt.Errorf("error deleting from notification queue: %w", err)
-			}
-			continue
-			// }
-		}
-
-		reqBody := new(bytes.Buffer)
-		err := json.NewEncoder(reqBody).Encode(n.Content.DiscordRequest)
-		if err != nil {
-			logger.WithError(err).Errorf("error marschalling webhook event")
-		}
-
-		_, err = url.Parse(n.Content.Webhook.Url)
-		if err != nil {
-			_, err := db.FrontendWriterDB.Exec(`DELETE FROM notification_queue where id = $1`, n.Id)
-			if err != nil {
-				return fmt.Errorf("error deleting from notification queue: %w", err)
-			}
+			db.FrontendWriterDB.Exec(`DELETE FROM notification_queue where id = $1`, n.Id)
 			continue
 		}
+		if _, exists := webhookMap[n.Content.Webhook.ID]; !exists {
+			webhookMap[n.Content.Webhook.ID] = n.Content.Webhook
+		}
+		if _, exists := notifMap[n.Content.Webhook.ID]; !exists {
+			notifMap[n.Content.Webhook.ID] = make([]types.TransitDiscord, 0)
+		}
+		notifMap[n.Content.Webhook.ID] = append(notifMap[n.Content.Webhook.ID], n)
+	}
+	for _, webhook := range webhookMap {
+		go func(webhook types.UserWebhook, reqs []types.TransitDiscord) {
+			defer func() {
+				// update retries counters in db based on end result
+				_, err = useDB.Exec(`UPDATE users_webhooks SET retries = $1, last_sent = now() WHERE id = $2;`, webhook.Retries, webhook.ID)
+				if err != nil {
+					logger.Warnf("failed to update retries counter to %v for webhook %v: %v", webhook.Retries, webhook.ID, err)
+				}
 
-		go func(n types.TransitDiscord) {
-			if n.Content.Webhook.Retries > 0 {
-				time.Sleep(time.Duration(n.Content.Webhook.Retries) * time.Second)
-			}
+				// mark notifcations as sent in db
+				ids := make([]uint64, 0)
+				for _, req := range reqs {
+					ids = append(ids, req.Id)
+				}
+				_, err = db.FrontendWriterDB.Exec(`UPDATE notification_queue SET sent = now() where id = ANY($1)`, pq.Array(ids))
+				if err != nil {
+					logger.Warnf("failed to update sent for notifcations in queue: %v", err)
+				}
+			}()
 
-			resp, err := client.Post(n.Content.Webhook.Url, "application/json", reqBody)
+			_, err = url.Parse(webhook.Url)
 			if err != nil {
-				logger.WithError(err).Errorf("error sending request")
-			} else {
-				metrics.NotificationsSent.WithLabelValues("webhook_discord", resp.Status).Inc()
+				logger.Errorf("invalid url for webhook id %v: %v", webhook.ID, err)
+				return
 			}
-			if resp != nil && resp.StatusCode < 400 {
-				_, err := useDB.Exec(`UPDATE notification_queue SET sent = now();`)
-				if err != nil {
-					logger.WithError(err).Errorf("error updating notification_queue table")
-					return
-				}
-				_, err = useDB.Exec(`UPDATE users_webhooks SET retries = 0, last_sent = now() WHERE id = $1;`, n.Content.Webhook.ID)
-				if err != nil {
-					logger.WithError(err).Errorf("error updating users_webhooks table; setting retries to zero")
-					return
-				}
-			} else {
-				var errResp types.ErrorResponse
 
-				if resp != nil {
-					b, err := io.ReadAll(resp.Body)
-					if err != nil {
-						logger.WithError(err).Error("error reading body")
-					} else {
-						errResp.Body = string(b)
+			for i := 0; i < len(reqs); i++ {
+				if webhook.Retries > 5 {
+					break // stop
+				}
+				// sleep between retries
+				time.Sleep(time.Duration(webhook.Retries) * time.Second)
+
+				reqBody := new(bytes.Buffer)
+				err := json.NewEncoder(reqBody).Encode(reqs[i].Content.DiscordRequest)
+				if err != nil {
+					logger.Errorf("error marschalling discord webhook event: %v", err)
+					continue // skip
+				}
+
+				logger.Infof("discord request webhook body: %s", reqBody.String())
+				resp, err := client.Post(webhook.Url, "application/json", reqBody)
+				if err != nil {
+					logger.Errorf("error sending discord webhook request: %v", err)
+				} else {
+					metrics.NotificationsSent.WithLabelValues("webhook_discord", resp.Status).Inc()
+				}
+				if resp != nil && resp.StatusCode < 400 {
+					webhook.Retries = 0
+				} else {
+					webhook.Retries++
+					var errResp types.ErrorResponse
+
+					if resp != nil {
+						b, err := io.ReadAll(resp.Body)
+						if err != nil {
+							logger.Errorf("error reading body for discord webhook response: %v", err)
+						} else {
+							errResp.Body = string(b)
+						}
+						errResp.Status = resp.Status
 					}
-					errResp.Status = resp.Status
-				}
+					logger.Errorf("error pushing discord webhook: %v", errResp.Body)
 
-				_, err = useDB.Exec(`UPDATE users_webhooks SET retries = retries + 1, last_sent = now(), request = $2, response = $3 WHERE id = $1;`, n.Content.Webhook.ID, n.Content.DiscordRequest, errResp)
-				if err != nil {
-					logger.WithError(err).Errorf("error updating users_webhooks table; increasing retries")
-					return
+					_, err = useDB.Exec(`UPDATE users_webhooks SET request = $2, response = $3 WHERE id = $1;`, webhook.ID, reqs[i].Content.DiscordRequest, errResp)
+					if err != nil {
+						logger.Errorf("error storing failure data in users_webhooks table: %v", err)
+					}
+
+					i-- // retry, IMPORTANT to be at the END of the ELSE, otherwise the wrong index will be used in the commands above!
 				}
 			}
-		}(n)
-
+		}(webhook, notifMap[webhook.ID])
 	}
+
 	return nil
-}
-
-type validatorBalanceDecreasedNotification struct {
-	ValidatorIndex     uint64
-	ValidatorPublicKey string
-	StartEpoch         uint64
-	EndEpoch           uint64
-	StartBalance       uint64
-	EndBalance         uint64
-	SubscriptionID     uint64
-	EventFilter        string
-	UnsubscribeHash    sql.NullString
-}
-
-func (n *validatorBalanceDecreasedNotification) GetUnsubscribeHash() string {
-	if n.UnsubscribeHash.Valid {
-		return n.UnsubscribeHash.String
-	}
-	return ""
-}
-
-func (n *validatorBalanceDecreasedNotification) GetEmailAttachment() *types.EmailAttachment {
-	return nil
-}
-
-func (n *validatorBalanceDecreasedNotification) GetSubscriptionID() uint64 {
-	return n.SubscriptionID
-}
-
-func (n *validatorBalanceDecreasedNotification) GetEpoch() uint64 {
-	return n.StartEpoch
-}
-
-func (n *validatorBalanceDecreasedNotification) GetEventName() types.EventName {
-	return types.ValidatorBalanceDecreasedEventName
-}
-
-func (n *validatorBalanceDecreasedNotification) GetInfo(includeUrl bool) string {
-	balance := float64(n.EndBalance) / 1e9
-	diff := float64(n.StartBalance-n.EndBalance) / 1e9
-
-	generalPart := fmt.Sprintf(`The balance of validator %[1]v decreased for 3 consecutive epochs by %.9[2]f ETH to %.9[3]f ETH from epoch %[4]v to epoch %[5]v.`, n.ValidatorIndex, diff, balance, n.StartEpoch, n.EndEpoch)
-	if includeUrl {
-		return generalPart + getUrlPart(n.ValidatorIndex)
-	}
-	return generalPart
-}
-
-func (n *validatorBalanceDecreasedNotification) GetTitle() string {
-	return "Validator Balance Decreased"
-}
-
-func (n *validatorBalanceDecreasedNotification) GetEventFilter() string {
-	return n.EventFilter
-}
-
-func (n *validatorBalanceDecreasedNotification) GetInfoMarkdown() string {
-	return n.GetInfo(false)
 }
 
 func getUrlPart(validatorIndex uint64) string {
-	return fmt.Sprintf(` For more information visit: https://%[2]s/validator/%[1]v`, validatorIndex, utils.Config.Frontend.SiteDomain)
+	return fmt.Sprintf(` For more information visit: <a href='https://%s/validator/%v'>https://%s/validator/%v</a>.`, utils.Config.Frontend.SiteDomain, validatorIndex, utils.Config.Frontend.SiteDomain, validatorIndex)
 }
 
-// collectValidatorBalanceDecreasedNotifications finds all validators whose balance decreased for 3 consecutive epochs
-// and creates notifications for all subscriptions which have not been notified about the validator since the last time its balance increased.
-// It looks 10 epochs back for when the balance increased the last time, this means if the explorer is not running for 10 epochs it is possible
-// that no new notification is sent even if there was a balance-increase.
-func collectValidatorBalanceDecreasedNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification) error {
-	latestEpoch := LatestEpoch()
-	if latestEpoch < 3 {
-		return nil
-	}
-	dbResult, err := db.GetValidatorsBalanceDecrease(latestEpoch)
-	if err != nil {
-		return err
-	}
-
-	query := ""
-	resultsLen := len(dbResult)
-	for i, event := range dbResult {
-		query += fmt.Sprintf(`SELECT %d as ref, id, user_id, ENCODE(unsubscribe_hash, 'hex') as unsubscribe_hash from users_subscriptions where event_name = $1 AND event_filter = '%s'  AND (last_sent_epoch > $2 OR last_sent_epoch IS NULL) AND created_epoch <= $2`, i, event.Pubkey)
-		if i < resultsLen-1 {
-			query += " UNION "
-		}
-	}
-	if query == "" {
-		return nil
-	}
-	var subscribers []struct {
-		Ref             uint64         `db:"ref"`
-		Id              uint64         `db:"id"`
-		UserId          uint64         `db:"user_id"`
-		UnsubscribeHash sql.NullString `db:"unsubscribe_hash"`
-	}
-
-	err = db.FrontendWriterDB.Select(&subscribers, query, types.ValidatorBalanceDecreasedEventName, latestEpoch)
-	if err != nil {
-		return err
-	}
-
-	for _, sub := range subscribers {
-		event := dbResult[sub.Ref]
-		n := &validatorBalanceDecreasedNotification{
-			SubscriptionID:  sub.Id,
-			ValidatorIndex:  event.ValidatorIndex,
-			StartEpoch:      latestEpoch - 3,
-			EndEpoch:        latestEpoch,
-			StartBalance:    event.StartBalance,
-			EndBalance:      event.EndBalance,
-			EventFilter:     event.Pubkey,
-			UnsubscribeHash: sub.UnsubscribeHash,
-		}
-
-		if _, exists := notificationsByUserID[sub.UserId]; !exists {
-			notificationsByUserID[sub.UserId] = map[types.EventName][]types.Notification{}
-		}
-		if _, exists := notificationsByUserID[sub.UserId][n.GetEventName()]; !exists {
-			notificationsByUserID[sub.UserId][n.GetEventName()] = []types.Notification{}
-		}
-		notificationsByUserID[sub.UserId][n.GetEventName()] = append(notificationsByUserID[sub.UserId][n.GetEventName()], n)
-		metrics.NotificationsCollected.WithLabelValues(string(n.GetEventName())).Inc()
-	}
-
-	return nil
-}
-
-func collectBlockProposalNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, status uint64, eventName types.EventName) error {
-	latestEpoch := LatestEpoch()
-
+func collectBlockProposalNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, status uint64, eventName types.EventName, epoch uint64) error {
 	type dbResult struct {
-		ValidatorIndex uint64 `db:"validatorindex"`
-		Epoch          uint64 `db:"epoch"`
-		Status         uint64 `db:"status"`
-		EventFilter    []byte `db:"pubkey"`
+		Proposer      uint64 `db:"proposer"`
+		Status        uint64 `db:"status"`
+		Slot          uint64 `db:"slot"`
+		ExecBlock     uint64 `db:"exec_block_number"`
+		ExecRewardETH float64
 	}
 
-	pubkeys, subMap, err := db.GetSubsForEventFilter(eventName)
+	_, subMap, err := db.GetSubsForEventFilter(eventName)
 	if err != nil {
 		return fmt.Errorf("error getting subscriptions for missted attestations %w", err)
 	}
 
 	events := make([]dbResult, 0)
-	batchSize := 5000
-	dataLen := len(pubkeys)
-	for i := 0; i < dataLen; i += batchSize {
-		var keys [][]byte
-		start := i
-		end := i + batchSize
+	err = db.WriterDb.Select(&events, "SELECT slot, proposer, status, COALESCE(exec_block_number, 0) AS exec_block_number FROM blocks WHERE epoch = $1 AND status = $2", epoch, fmt.Sprintf("%d", status))
+	if err != nil {
+		return fmt.Errorf("error retrieving slots for epoch %v: %w", epoch, err)
+	}
 
-		if dataLen < end {
-			end = dataLen
+	logger.Infof("retrieved %v events", len(events))
+
+	// Get Execution reward for proposed blocks
+	if status == 1 { // if proposed
+		var blockList = []uint64{}
+		for _, data := range events {
+			if data.ExecBlock != 0 {
+				blockList = append(blockList, data.ExecBlock)
+			}
 		}
 
-		keys = pubkeys[start:end]
+		if len(blockList) > 0 {
+			blocks, err := db.BigtableClient.GetBlocksIndexedMultiple(blockList, 10000)
+			if err != nil {
+				logger.WithError(err).Errorf("can not load blocks from bigtable for notification")
+				return err
+			}
+			var execBlockNrToExecBlockMap = map[uint64]*types.Eth1BlockIndexed{}
+			for _, block := range blocks {
+				execBlockNrToExecBlockMap[block.GetNumber()] = block
+			}
+			relaysData, err := db.GetRelayDataForIndexedBlocks(blocks)
+			if err != nil {
+				return err
+			}
 
-		var partial []dbResult
-
-		err = db.WriterDb.Select(&partial, `
-				SELECT 
-					v.validatorindex, 
-					pa.epoch,
-					pa.status,
-					v.pubkey as pubkey
-				FROM 
-				(SELECT 
-					v.validatorindex as validatorindex, 
-					v.pubkey as pubkey
-				FROM validators v
-				WHERE pubkey = ANY($3)) v
-				INNER JOIN proposal_assignments pa ON v.validatorindex = pa.validatorindex AND pa.epoch >= ($1 - 5) 
-				WHERE pa.status = $2 AND pa.epoch >= ($1 - 5)`, latestEpoch, status, pq.ByteaArray(keys))
-		if err != nil {
-			return err
+			for j := 0; j < len(events); j++ {
+				execData, found := execBlockNrToExecBlockMap[events[j].ExecBlock]
+				if found {
+					reward := utils.Eth1TotalReward(execData)
+					relayData, found := relaysData[common.BytesToHash(execData.Hash)]
+					if found {
+						reward = relayData.MevBribe.BigInt()
+					}
+					events[j].ExecRewardETH = float64(int64(eth.WeiToEth(reward)*100000)) / 100000
+				}
+			}
 		}
-		events = append(events, partial...)
 	}
 
 	for _, event := range events {
-		subscribers, ok := subMap[hex.EncodeToString(event.EventFilter)]
-		if !ok {
-			return fmt.Errorf("error event returned that does not exist: %x", event.EventFilter)
-		}
-		for _, sub := range subscribers {
-			if sub.UserID == nil || sub.ID == nil {
-				return fmt.Errorf("error expected userId or subId to be defined but got user: %v, sub: %v", sub.UserID, sub.ID)
-			}
-			if sub.LastEpoch != nil {
-				lastSentEpoch := *sub.LastEpoch
-				if lastSentEpoch >= event.Epoch || event.Epoch < sub.CreatedEpoch {
-					continue
+		pubkey, err := GetGetPubkeyForIndex(event.Proposer)
+		if err == nil {
+			subscribers, ok := subMap[hex.EncodeToString(pubkey)]
+			if ok {
+				for _, sub := range subscribers {
+					if sub.UserID == nil || sub.ID == nil {
+						return fmt.Errorf("error expected userId or subId to be defined but got user: %v, sub: %v", sub.UserID, sub.ID)
+					}
+					if sub.LastEpoch != nil {
+						lastSentEpoch := *sub.LastEpoch
+						if lastSentEpoch >= epoch || epoch < sub.CreatedEpoch {
+							continue
+						}
+					}
+					logger.Infof("creating %v notification for validator %v in epoch %v", eventName, event.Proposer, epoch)
+					n := &validatorProposalNotification{
+						SubscriptionID: *sub.ID,
+						ValidatorIndex: event.Proposer,
+						Epoch:          epoch,
+						Status:         event.Status,
+						EventName:      eventName,
+						Reward:         event.ExecRewardETH,
+						EventFilter:    hex.EncodeToString(pubkey),
+					}
+					if _, exists := notificationsByUserID[*sub.UserID]; !exists {
+						notificationsByUserID[*sub.UserID] = map[types.EventName][]types.Notification{}
+					}
+					if _, exists := notificationsByUserID[*sub.UserID][n.GetEventName()]; !exists {
+						notificationsByUserID[*sub.UserID][n.GetEventName()] = []types.Notification{}
+					}
+					notificationsByUserID[*sub.UserID][n.GetEventName()] = append(notificationsByUserID[*sub.UserID][n.GetEventName()], n)
+					metrics.NotificationsCollected.WithLabelValues(string(n.GetEventName())).Inc()
 				}
 			}
-			n := &validatorProposalNotification{
-				SubscriptionID: *sub.ID,
-				ValidatorIndex: event.ValidatorIndex,
-				Epoch:          event.Epoch,
-				Status:         event.Status,
-				EventName:      eventName,
-				EventFilter:    hex.EncodeToString(event.EventFilter),
-			}
-			if _, exists := notificationsByUserID[*sub.UserID]; !exists {
-				notificationsByUserID[*sub.UserID] = map[types.EventName][]types.Notification{}
-			}
-			if _, exists := notificationsByUserID[*sub.UserID][n.GetEventName()]; !exists {
-				notificationsByUserID[*sub.UserID][n.GetEventName()] = []types.Notification{}
-			}
-			notificationsByUserID[*sub.UserID][n.GetEventName()] = append(notificationsByUserID[*sub.UserID][n.GetEventName()], n)
-			metrics.NotificationsCollected.WithLabelValues(string(n.GetEventName())).Inc()
+		} else {
+			logger.Errorf("error retrieving pubkey for validator %v: %v", event.Proposer, err)
 		}
+
 	}
 
 	return nil
@@ -1362,7 +1273,12 @@ type validatorProposalNotification struct {
 	Status             uint64 // * Can be 0 = scheduled, 1 executed, 2 missed */
 	EventName          types.EventName
 	EventFilter        string
+	Reward             float64
 	UnsubscribeHash    sql.NullString
+}
+
+func (n *validatorProposalNotification) GetLatestState() string {
+	return ""
 }
 
 func (n *validatorProposalNotification) GetUnsubscribeHash() string {
@@ -1392,11 +1308,11 @@ func (n *validatorProposalNotification) GetInfo(includeUrl bool) string {
 	var generalPart = ""
 	switch n.Status {
 	case 0:
-		generalPart = fmt.Sprintf(`New scheduled block proposal for Validator %[1]v.`, n.ValidatorIndex)
+		generalPart = fmt.Sprintf(`New scheduled block proposal for Validator %v.`, n.ValidatorIndex)
 	case 1:
-		generalPart = fmt.Sprintf(`Validator %[1]v proposed a new block.`, n.ValidatorIndex)
+		generalPart = fmt.Sprintf(`Validator %v proposed a new block with %v ETH execution reward.`, n.ValidatorIndex, n.Reward)
 	case 2:
-		generalPart = fmt.Sprintf(`Validator %[1]v missed a block proposal.`, n.ValidatorIndex)
+		generalPart = fmt.Sprintf(`Validator %v missed a block proposal.`, n.ValidatorIndex)
 	}
 
 	if includeUrl {
@@ -1427,7 +1343,7 @@ func (n *validatorProposalNotification) GetInfoMarkdown() string {
 	case 0:
 		generalPart = fmt.Sprintf(`New scheduled block proposal for Validator [%[1]v](https://%[2]v/%[1]v).`, n.ValidatorIndex, utils.Config.Frontend.SiteDomain+"/validator")
 	case 1:
-		generalPart = fmt.Sprintf(`Validator [%[1]v](https://%[2]v/%[1]v) proposed a new block.`, n.ValidatorIndex, utils.Config.Frontend.SiteDomain+"/validator")
+		generalPart = fmt.Sprintf(`Validator [%[1]v](https://%[2]v/%[1]v) proposed a new block with %[3]v ETH execution reward.`, n.ValidatorIndex, utils.Config.Frontend.SiteDomain+"/validator", n.Reward)
 	case 2:
 		generalPart = fmt.Sprintf(`Validator [%[1]v](https://%[2]v/%[1]v) missed a block proposal.`, n.ValidatorIndex, utils.Config.Frontend.SiteDomain+"/validator")
 	}
@@ -1435,11 +1351,8 @@ func (n *validatorProposalNotification) GetInfoMarkdown() string {
 	return generalPart
 }
 
-func collectAttestationNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, status uint64, eventName types.EventName) error {
-	latestEpoch := LatestEpoch()
-	latestSlot := LatestSlot()
-
-	pubkeys, subMap, err := db.GetSubsForEventFilter(types.ValidatorMissedAttestationEventName)
+func collectAttestationAndOfflineValidatorNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, status uint64, epoch uint64) error {
+	_, subMap, err := db.GetSubsForEventFilter(types.ValidatorMissedAttestationEventName)
 	if err != nil {
 		return fmt.Errorf("error getting subscriptions for missted attestations %w", err)
 	}
@@ -1453,46 +1366,56 @@ func collectAttestationNotifications(notificationsByUserID map[uint64]map[types.
 		EventFilter    []byte `db:"pubkey"`
 	}
 
-	events := make([]dbResult, 0)
-	batchSize := 5000
-	dataLen := len(pubkeys)
-	for i := 0; i < dataLen; i += batchSize {
-		var keys [][]byte
-		start := i
-		end := i + batchSize
-
-		if dataLen < end {
-			end = dataLen
-		}
-
-		keys = pubkeys[start:end]
-
-		var partial []dbResult
-		err = db.WriterDb.Select(&partial, `
-		SELECT 
-			v.validatorindex,
-			v.pubkey,
-			aa.epoch,
-			aa.status,
-			aa.attesterslot,
-			aa.inclusionslot
-		FROM
-		(SELECT 
-				v.validatorindex as validatorindex, 
-				v.pubkey as pubkey
-			FROM validators v
-			WHERE pubkey = ANY($4)) v
-			INNER JOIN attestation_assignments_p aa ON v.validatorindex = aa.validatorindex AND aa.week >= ($1 - 3) / 1575 AND aa.epoch >= ($1 - 3)
-			WHERE status = $3
-			AND aa.inclusionslot = 0 AND aa.attesterslot < ($2 - 32)
-			`, latestEpoch, latestSlot, status, pq.ByteaArray(keys))
-		if err != nil {
-			return err
-		}
-
-		events = append(events, partial...)
+	// get attestations for all validators for the last n epochs
+	attestations, err := db.BigtableClient.GetValidatorAttestationHistory([]uint64{}, epoch-4, epoch) // retrieve attestation data of the last 3 epochs
+	if err != nil {
+		return fmt.Errorf("error getting validator attestations from bigtable %w", err)
 	}
 
+	logger.Infof("retrieved validator attestation history data")
+
+	events := make([]dbResult, 0)
+
+	epochAttested := make(map[uint64]uint64)
+	epochTotal := make(map[uint64]uint64)
+	participationPerEpoch := make(map[uint64]map[uint64]int) // map[validatorindex]map[epoch]attested
+	for validator, history := range attestations {
+		for _, attestation := range history {
+			if participationPerEpoch[validator] == nil {
+				participationPerEpoch[validator] = make(map[uint64]int, 4)
+			}
+			epochTotal[attestation.Epoch] = epochTotal[attestation.Epoch] + 1 // count the total attestations for each epoch
+
+			if attestation.Status == 0 {
+
+				participationPerEpoch[validator][attestation.Epoch] = 1 // missed
+
+				pubkey, err := GetGetPubkeyForIndex(validator)
+				if err == nil {
+					if attestation.Epoch != epoch || subMap[hex.EncodeToString(pubkey)] == nil {
+						continue
+					}
+
+					events = append(events, dbResult{
+						ValidatorIndex: validator,
+						Epoch:          attestation.Epoch,
+						Status:         attestation.Status,
+						Slot:           attestation.AttesterSlot,
+						InclusionSlot:  attestation.InclusionSlot,
+						EventFilter:    pubkey,
+					})
+				} else {
+					logger.Errorf("error retrieving pubkey for validator %v: %v", validator, err)
+				}
+			} else {
+				participationPerEpoch[validator][attestation.Epoch] = 2 // attested
+
+				epochAttested[attestation.Epoch] = epochAttested[attestation.Epoch] + 1 // count the total attested attestation for each epoch (exlude missing)
+			}
+		}
+	}
+
+	// process missed attestation events
 	for _, event := range events {
 		subscribers, ok := subMap[hex.EncodeToString(event.EventFilter)]
 		if !ok {
@@ -1505,15 +1428,18 @@ func collectAttestationNotifications(notificationsByUserID map[uint64]map[types.
 			if sub.LastEpoch != nil {
 				lastSentEpoch := *sub.LastEpoch
 				if lastSentEpoch >= event.Epoch || event.Epoch < sub.CreatedEpoch {
+					// logger.Infof("skipping creating %v for validator %v (lastSentEpoch: %v, createdEpoch: %v)", types.ValidatorMissedAttestationEventName, event.ValidatorIndex, lastSentEpoch, sub.CreatedEpoch)
 					continue
 				}
 			}
+
+			logger.Infof("creating %v notification for validator %v in epoch %v", types.ValidatorMissedAttestationEventName, event.ValidatorIndex, event.Epoch)
 			n := &validatorAttestationNotification{
 				SubscriptionID: *sub.ID,
 				ValidatorIndex: event.ValidatorIndex,
 				Epoch:          event.Epoch,
 				Status:         event.Status,
-				EventName:      eventName,
+				EventName:      types.ValidatorMissedAttestationEventName,
 				Slot:           event.Slot,
 				InclusionSlot:  event.InclusionSlot,
 				EventFilter:    hex.EncodeToString(event.EventFilter),
@@ -1538,7 +1464,253 @@ func collectAttestationNotifications(notificationsByUserID map[uint64]map[types.
 		}
 	}
 
+	// detect online & offline validators
+	type indexPubkeyPair struct {
+		Index  uint64
+		Pubkey []byte
+	}
+	var offlineValidators []*indexPubkeyPair
+	var onlineValidators []*indexPubkeyPair
+
+	epochNMinus1 := epoch - 1
+	epochNMinus2 := epoch - 2
+	epochNMinus3 := epoch - 3
+
+	if epochTotal[epoch] == 0 {
+		return fmt.Errorf("consistency error, did not retrieve attestation data for epoch %v", epoch)
+	}
+	if epochTotal[epochNMinus1] == 0 {
+		return fmt.Errorf("consistency error, did not retrieve attestation data for epoch %v", epochNMinus1)
+	}
+	if epochTotal[epochNMinus2] == 0 {
+		return fmt.Errorf("consistency error, did not retrieve attestation data for epoch %v", epochNMinus2)
+	}
+	if epochTotal[epochNMinus3] == 0 {
+		return fmt.Errorf("consistency error, did not retrieve attestation data for epoch %v", epochNMinus3)
+	}
+
+	if epochAttested[epoch]*100/epochTotal[epoch] < 60 {
+		return fmt.Errorf("consistency error, did receive more than 60%% of missed attestation in epoch %v (total: %v, attested: %v)", epoch, epochTotal[epoch], epochAttested[epoch])
+	}
+	if epochAttested[epochNMinus1]*100/epochTotal[epochNMinus1] < 60 {
+		return fmt.Errorf("consistency error, did receive more than 60%% of missed attestation in epoch %v (total: %v, attested: %v)", epochNMinus1, epochTotal[epochNMinus1], epochAttested[epochNMinus1])
+	}
+	if epochAttested[epochNMinus2]*100/epochTotal[epochNMinus2] < 60 {
+		return fmt.Errorf("consistency error, did receive more than 60%% of missed attestation in epoch %v (total: %v, attested: %v)", epochNMinus2, epochTotal[epochNMinus2], epochAttested[epochNMinus2])
+	}
+	if epochAttested[epochNMinus3]*100/epochTotal[epochNMinus3] < 60 {
+		return fmt.Errorf("consistency error, did receive more than 60%% of missed attestation in epoch %v (total: %v, attested: %v)", epochNMinus3, epochTotal[epochNMinus3], epochAttested[epochNMinus3])
+	}
+
+	for validator, participation := range participationPerEpoch {
+		if participation[epochNMinus3] == 2 && participation[epochNMinus2] == 1 && participation[epochNMinus1] == 1 && participation[epoch] == 1 {
+			logger.Infof("validator %v detected as offline in epoch %v (did not attest since epoch %v)", validator, epoch, epochNMinus2)
+			pubkey, err := GetGetPubkeyForIndex(validator)
+			if err != nil {
+				return err
+			}
+			offlineValidators = append(offlineValidators, &indexPubkeyPair{Index: validator, Pubkey: pubkey})
+		}
+
+		if participation[epochNMinus3] == 1 && participation[epochNMinus2] == 1 && participation[epochNMinus1] == 1 && participation[epoch] == 2 {
+			logger.Infof("validator %v detected as online in epoch %v (attested again in epoch %v)", validator, epoch, epoch)
+			pubkey, err := GetGetPubkeyForIndex(validator)
+			if err != nil {
+				return err
+			}
+			onlineValidators = append(onlineValidators, &indexPubkeyPair{Index: validator, Pubkey: pubkey})
+		}
+	}
+
+	if len(offlineValidators) > 5000 {
+		return fmt.Errorf("retrieved more than 5000 offline validators notifications: %v, exiting", len(offlineValidators))
+	}
+
+	if len(onlineValidators) > 5000 {
+		return fmt.Errorf("retrieved more than 5000 online validators notifications: %v, exiting", len(onlineValidators))
+	}
+
+	_, subMap, err = db.GetSubsForEventFilter(types.ValidatorIsOfflineEventName)
+	if err != nil {
+		return fmt.Errorf("failed to get subs for %v: %v", types.ValidatorIsOfflineEventName, err)
+	}
+
+	for _, validator := range offlineValidators {
+		t := hex.EncodeToString(validator.Pubkey)
+		subs := subMap[t]
+		for _, sub := range subs {
+			if sub.UserID == nil || sub.ID == nil {
+				return fmt.Errorf("error expected userId or subId to be defined but got user: %v, sub: %v", sub.UserID, sub.ID)
+			}
+			logger.Infof("new event: validator %v detected as offline since epoch %v", validator.Index, epoch)
+
+			n := validatorIsOfflineNotification{
+				SubscriptionID: *sub.ID,
+				ValidatorIndex: validator.Index,
+				IsOffline:      true,
+				EventEpoch:     epoch,
+				EventName:      types.ValidatorIsOfflineEventName,
+				InternalState:  fmt.Sprint(epoch - 2), // first epoch the validator stopped attesting
+				EventFilter:    hex.EncodeToString(validator.Pubkey),
+			}
+
+			if _, exists := notificationsByUserID[*sub.UserID]; !exists {
+				notificationsByUserID[*sub.UserID] = map[types.EventName][]types.Notification{}
+			}
+			if _, exists := notificationsByUserID[*sub.UserID][n.GetEventName()]; !exists {
+				notificationsByUserID[*sub.UserID][n.GetEventName()] = []types.Notification{}
+			}
+			isDuplicate := false
+			for _, userEvent := range notificationsByUserID[*sub.UserID][n.GetEventName()] {
+				if userEvent.GetSubscriptionID() == n.SubscriptionID {
+					isDuplicate = true
+					break
+				}
+			}
+			if isDuplicate {
+				logger.Infof("duplicate offline notification detected")
+				continue
+			}
+			notificationsByUserID[*sub.UserID][n.GetEventName()] = append(notificationsByUserID[*sub.UserID][n.GetEventName()], &n)
+			metrics.NotificationsCollected.WithLabelValues(string(n.GetEventName())).Inc()
+		}
+	}
+
+	for _, validator := range onlineValidators {
+		t := hex.EncodeToString(validator.Pubkey)
+		subs := subMap[t]
+		for _, sub := range subs {
+			if sub.State.String == "" || sub.State.String == "-" { // discard online notifications that do not have a corresponding offline notification
+				continue
+			}
+
+			originalLastSeenEpoch, err := strconv.ParseUint(sub.State.String, 10, 64)
+			if err != nil {
+				// i have no idea what just happened.
+				return fmt.Errorf("this should never happen. couldn't parse state as uint64: %v", err)
+			}
+
+			epochsSinceOffline := epoch - originalLastSeenEpoch
+
+			if epochsSinceOffline > epoch { // fix overflow
+				epochsSinceOffline = 4
+			}
+
+			if sub.UserID == nil || sub.ID == nil {
+				return fmt.Errorf("error expected userId or subId to be defined but got user: %v, sub: %v", sub.UserID, sub.ID)
+			}
+
+			logger.Infof("new event: validator %v detected as online again at epoch %v", validator.Index, epoch)
+
+			n := validatorIsOfflineNotification{
+				SubscriptionID: *sub.ID,
+				ValidatorIndex: validator.Index,
+				IsOffline:      false,
+				EventEpoch:     epoch,
+				EventName:      types.ValidatorIsOfflineEventName,
+				InternalState:  "-",
+				EventFilter:    hex.EncodeToString(validator.Pubkey),
+				EpochsOffline:  epochsSinceOffline,
+			}
+
+			if _, exists := notificationsByUserID[*sub.UserID]; !exists {
+				notificationsByUserID[*sub.UserID] = map[types.EventName][]types.Notification{}
+			}
+			if _, exists := notificationsByUserID[*sub.UserID][n.GetEventName()]; !exists {
+				notificationsByUserID[*sub.UserID][n.GetEventName()] = []types.Notification{}
+			}
+			isDuplicate := false
+			for _, userEvent := range notificationsByUserID[*sub.UserID][n.GetEventName()] {
+				if userEvent.GetSubscriptionID() == n.SubscriptionID {
+					isDuplicate = true
+					break
+				}
+			}
+			if isDuplicate {
+				logger.Infof("duplicate online notification detected")
+				continue
+			}
+			notificationsByUserID[*sub.UserID][n.GetEventName()] = append(notificationsByUserID[*sub.UserID][n.GetEventName()], &n)
+			metrics.NotificationsCollected.WithLabelValues(string(n.GetEventName())).Inc()
+		}
+	}
+
 	return nil
+}
+
+type validatorIsOfflineNotification struct {
+	SubscriptionID  uint64
+	ValidatorIndex  uint64
+	EventEpoch      uint64
+	EpochsOffline   uint64
+	IsOffline       bool
+	EventName       types.EventName
+	EventFilter     string
+	UnsubscribeHash sql.NullString
+	InternalState   string
+}
+
+func (n *validatorIsOfflineNotification) GetLatestState() string {
+	return n.InternalState
+}
+
+func (n *validatorIsOfflineNotification) GetSubscriptionID() uint64 {
+	return n.SubscriptionID
+}
+
+func (n *validatorIsOfflineNotification) GetEventName() types.EventName {
+	return n.EventName
+}
+
+func (n *validatorIsOfflineNotification) GetEpoch() uint64 {
+	return n.EventEpoch
+}
+
+func (n *validatorIsOfflineNotification) GetInfo(includeUrl bool) string {
+	if n.IsOffline {
+		if includeUrl {
+			return fmt.Sprintf(`Validator <a href="https://%[3]v/validator/%[1]v">%[1]v</a> is offline since epoch <a href="https://%[3]v/epoch/%[2]v">%[2]v</a>).`, n.ValidatorIndex, n.EventEpoch, utils.Config.Frontend.SiteDomain)
+		} else {
+			return fmt.Sprintf(`Validator %v is offline since epoch %v.`, n.ValidatorIndex, n.EventEpoch)
+		}
+	} else {
+		if includeUrl {
+			return fmt.Sprintf(`Validator <a href="https://%[3]v/validator/%[1]v">%[1]v</a> is back online since epoch <a href="https://%[3]v/epoch/%[2]v">%[2]v</a> (was offline for %[4]v epoch(s)).`, n.ValidatorIndex, n.EventEpoch, utils.Config.Frontend.SiteDomain, n.EpochsOffline)
+		} else {
+			return fmt.Sprintf(`Validator %v is back online since epoch %v (was offline for %v epoch(s)).`, n.ValidatorIndex, n.EventEpoch, n.EpochsOffline)
+		}
+	}
+}
+
+func (n *validatorIsOfflineNotification) GetTitle() string {
+	if n.IsOffline {
+		return "Validator is Offline"
+	} else {
+		return "Validator Back Online"
+	}
+}
+
+func (n *validatorIsOfflineNotification) GetEventFilter() string {
+	return n.EventFilter
+}
+
+func (n *validatorIsOfflineNotification) GetEmailAttachment() *types.EmailAttachment {
+	return nil
+}
+
+func (n *validatorIsOfflineNotification) GetUnsubscribeHash() string {
+	if n.UnsubscribeHash.Valid {
+		return n.UnsubscribeHash.String
+	}
+	return ""
+}
+
+func (n *validatorIsOfflineNotification) GetInfoMarkdown() string {
+	if n.IsOffline {
+		return fmt.Sprintf(`Validator [%[1]v](https://%[3]v/validator/%[1]v) is offline since epoch [%[2]v](https://%[3]v/epoch/%[2]v).`, n.ValidatorIndex, n.EventEpoch, utils.Config.Frontend.SiteDomain)
+	} else {
+		return fmt.Sprintf(`Validator [%[1]v](https://%[3]v/validator/%[1]v) is back online since epoch [%[2]v](https://%[3]v/epoch/%[2]v) (was offline for %[4]v epoch(s)).`, n.ValidatorIndex, n.EventEpoch, utils.Config.Frontend.SiteDomain, n.EpochsOffline)
+	}
 }
 
 type validatorAttestationNotification struct {
@@ -1552,6 +1724,10 @@ type validatorAttestationNotification struct {
 	InclusionSlot      uint64
 	EventFilter        string
 	UnsubscribeHash    sql.NullString
+}
+
+func (n *validatorAttestationNotification) GetLatestState() string {
+	return ""
 }
 
 func (n *validatorAttestationNotification) GetSubscriptionID() uint64 {
@@ -1571,19 +1747,19 @@ func (n *validatorAttestationNotification) GetInfo(includeUrl bool) string {
 	if includeUrl {
 		switch n.Status {
 		case 0:
-			generalPart = fmt.Sprintf(`Validator <a href="https://%[3]v/validator/%[1]v">%[1]v</a> missed an attestation at slot <a href="https://%[3]v/block/%[2]v">%[2]v</a>.`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
-			//generalPart = fmt.Sprintf(`New scheduled attestation for Validator %[1]v at slot %[2]v.`, n.ValidatorIndex, n.Slot)
+			generalPart = fmt.Sprintf(`Validator <a href="https://%[3]v/validator/%[1]v">%[1]v</a> missed an attestation at slot <a href="https://%[3]v/slot/%[2]v">%[2]v</a>.`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
+			//generalPart = fmt.Sprintf(`New scheduled attestation for Validator %v at slot %v.`, n.ValidatorIndex, n.Slot)
 		case 1:
-			generalPart = fmt.Sprintf(`Validator <a href="https://%[3]v/validator/%[1]v">%[1]v</a> submitted a successful attestation for slot  <a href="https://%[3]v/block/%[2]v">%[2]v</a>.`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
+			generalPart = fmt.Sprintf(`Validator <a href="https://%[3]v/validator/%[1]v">%[1]v</a> submitted a successful attestation for slot  <a href="https://%[3]v/slot/%[2]v">%[2]v</a>.`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
 		}
 		// return generalPart + getUrlPart(n.ValidatorIndex)
 	} else {
 		switch n.Status {
 		case 0:
-			generalPart = fmt.Sprintf(`Validator %[1]v missed an attestation at slot %[2]v.`, n.ValidatorIndex, n.Slot)
-			//generalPart = fmt.Sprintf(`New scheduled attestation for Validator %[1]v at slot %[2]v.`, n.ValidatorIndex, n.Slot)
+			generalPart = fmt.Sprintf(`Validator %v missed an attestation at slot %v.`, n.ValidatorIndex, n.Slot)
+			//generalPart = fmt.Sprintf(`New scheduled attestation for Validator %v at slot %v.`, n.ValidatorIndex, n.Slot)
 		case 1:
-			generalPart = fmt.Sprintf(`Validator %[1]v submitted a successful attestation for slot %[2]v.`, n.ValidatorIndex, n.Slot)
+			generalPart = fmt.Sprintf(`Validator %v submitted a successful attestation for slot %v.`, n.ValidatorIndex, n.Slot)
 		}
 	}
 	return generalPart
@@ -1618,9 +1794,9 @@ func (n *validatorAttestationNotification) GetInfoMarkdown() string {
 	var generalPart = ""
 	switch n.Status {
 	case 0:
-		generalPart = fmt.Sprintf(`Validator [%[1]v](https://%[3]v/validator/%[1]v) missed an attestation at slot [%[2]v](https://%[3]v/block/%[2]v).`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
+		generalPart = fmt.Sprintf(`Validator [%[1]v](https://%[3]v/validator/%[1]v) missed an attestation at slot [%[2]v](https://%[3]v/slot/%[2]v).`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
 	case 1:
-		generalPart = fmt.Sprintf(`Validator [%[1]v](https://%[3]v/validator/%[1]v) submitted a successful attestation for slot [%[2]v](https://%[3]v/block/%[2]v).`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
+		generalPart = fmt.Sprintf(`Validator [%[1]v](https://%[3]v/validator/%[1]v) submitted a successful attestation for slot [%[2]v](https://%[3]v/slot/%[2]v).`, n.ValidatorIndex, n.Slot, utils.Config.Frontend.SiteDomain)
 	}
 	return generalPart
 }
@@ -1633,6 +1809,10 @@ type validatorGotSlashedNotification struct {
 	Reason          string
 	EventFilter     string
 	UnsubscribeHash sql.NullString
+}
+
+func (n *validatorGotSlashedNotification) GetLatestState() string {
+	return ""
 }
 
 func (n *validatorGotSlashedNotification) GetUnsubscribeHash() string {
@@ -1659,7 +1839,7 @@ func (n *validatorGotSlashedNotification) GetEventName() types.EventName {
 }
 
 func (n *validatorGotSlashedNotification) GetInfo(includeUrl bool) string {
-	generalPart := fmt.Sprintf(`Validator %[1]v has been slashed at epoch %[2]v by validator %[3]v for %[4]s.`, n.ValidatorIndex, n.Epoch, n.Slasher, n.Reason)
+	generalPart := fmt.Sprintf(`Validator %v has been slashed at epoch %v by validator %v for %s.`, n.ValidatorIndex, n.Epoch, n.Slasher, n.Reason)
 	if includeUrl {
 		return generalPart + getUrlPart(n.ValidatorIndex)
 	}
@@ -1679,26 +1859,15 @@ func (n *validatorGotSlashedNotification) GetInfoMarkdown() string {
 	return generalPart
 }
 
-func collectValidatorGotSlashedNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification) error {
-	latestEpoch := LatestEpoch()
-	if latestEpoch == 0 {
-		return nil
-	}
-
-	// only consider the most recent epochs
-	lookBack := int64(latestEpoch) - 50
-	if lookBack < 0 {
-		lookBack = 0
-	}
-
-	dbResult, err := db.GetValidatorsGotSlashed(uint64(lookBack))
+func collectValidatorGotSlashedNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, epoch uint64) error {
+	dbResult, err := db.GetValidatorsGotSlashed(epoch)
 	if err != nil {
 		return fmt.Errorf("error getting slashed validators from database, err: %w", err)
 	}
 	query := ""
 	resultsLen := len(dbResult)
 	for i, event := range dbResult {
-		query += fmt.Sprintf(`SELECT %d as ref, id, user_id, ENCODE(unsubscribe_hash, 'hex') as unsubscribe_hash from users_subscriptions where event_name = $1 AND event_filter = '%x'  AND (last_sent_epoch > $2 OR last_sent_epoch IS NULL)`, i, event.SlashedValidatorPubkey)
+		query += fmt.Sprintf(`SELECT %d as ref, id, user_id, ENCODE(unsubscribe_hash, 'hex') as unsubscribe_hash from users_subscriptions where event_name = $1 AND event_filter = '%x'`, i, event.SlashedValidatorPubkey)
 		if i < resultsLen-1 {
 			query += " UNION "
 		}
@@ -1719,13 +1888,16 @@ func collectValidatorGotSlashedNotifications(notificationsByUserID map[uint64]ma
 	if utils.Config.Chain.Config.ConfigName != "" {
 		name = utils.Config.Chain.Config.ConfigName + ":" + name
 	}
-	err = db.FrontendWriterDB.Select(&subscribers, query, name, latestEpoch)
+	err = db.FrontendWriterDB.Select(&subscribers, query, name)
 	if err != nil {
 		return fmt.Errorf("error querying subscribers, err: %w", err)
 	}
 
 	for _, sub := range subscribers {
 		event := dbResult[sub.Ref]
+
+		logger.Infof("creating %v notification for validator %v in epoch %v", event.SlashedValidatorPubkey, event.Reason, epoch)
+
 		n := &validatorGotSlashedNotification{
 			SubscriptionID:  sub.Id,
 			Slasher:         event.SlasherIndex,
@@ -1749,6 +1921,120 @@ func collectValidatorGotSlashedNotifications(notificationsByUserID map[uint64]ma
 	return nil
 }
 
+type validatorWithdrawalNotification struct {
+	SubscriptionID  uint64
+	ValidatorIndex  uint64
+	Epoch           uint64
+	Slot            uint64
+	Amount          uint64
+	Address         []byte
+	EventFilter     string
+	UnsubscribeHash sql.NullString
+}
+
+func (n *validatorWithdrawalNotification) GetLatestState() string {
+	return ""
+}
+
+func (n *validatorWithdrawalNotification) GetUnsubscribeHash() string {
+	if n.UnsubscribeHash.Valid {
+		return n.UnsubscribeHash.String
+	}
+	return ""
+}
+
+func (n *validatorWithdrawalNotification) GetEmailAttachment() *types.EmailAttachment {
+	return nil
+}
+
+func (n *validatorWithdrawalNotification) GetSubscriptionID() uint64 {
+	return n.SubscriptionID
+}
+
+func (n *validatorWithdrawalNotification) GetEpoch() uint64 {
+	return n.Epoch
+}
+
+func (n *validatorWithdrawalNotification) GetEventName() types.EventName {
+	return types.ValidatorReceivedWithdrawalEventName
+}
+
+func (n *validatorWithdrawalNotification) GetInfo(includeUrl bool) string {
+	generalPart := fmt.Sprintf(`A withdrawal of %v has been processed for validator %v.`, utils.FormatCurrentBalance(n.Amount, "ETH"), n.ValidatorIndex)
+	if includeUrl {
+		return generalPart + getUrlPart(n.ValidatorIndex)
+	}
+	return generalPart
+}
+
+func (n *validatorWithdrawalNotification) GetTitle() string {
+	return "Withdrawal Processed"
+}
+
+func (n *validatorWithdrawalNotification) GetEventFilter() string {
+	return n.EventFilter
+}
+
+func (n *validatorWithdrawalNotification) GetInfoMarkdown() string {
+	generalPart := fmt.Sprintf(`A withdrawal of %[2]v has been processed for validator [%[1]v](https://%[6]v/validator/%[1]v) during slot [%[3]v](https://%[6]v/slot/%[3]v). The funds have been sent to: [%[4]v](https://%[6]v/address/%[4]v).`, n.ValidatorIndex, utils.FormatCurrentBalance(n.Amount, "ETH"), n.Slot, utils.FormatHash(n.Address), n.Address, utils.Config.Frontend.SiteDomain)
+	return generalPart
+}
+
+// collectWithdrawalNotifications collects all notifications validator withdrawals
+func collectWithdrawalNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, epoch uint64) error {
+
+	// get all users that are subscribed to this event (scale: a few thousand rows depending on how many users we have)
+	_, subMap, err := db.GetSubsForEventFilter(types.ValidatorReceivedWithdrawalEventName)
+	if err != nil {
+		return fmt.Errorf("error getting subscriptions for missed attestations %w", err)
+	}
+
+	// get all the withdrawal events for a specific epoch. Will be at most X per slot (currently 16 on mainnet, which is 32 * 16 per epoch; 512 rows).
+	events, err := db.GetEpochWithdrawals(epoch)
+	if err != nil {
+		return fmt.Errorf("error getting withdrawals from database, err: %w", err)
+	}
+
+	// logger.Infof("retrieved %v events", len(events))
+	for _, event := range events {
+		subscribers, ok := subMap[hex.EncodeToString(event.Pubkey)]
+		if ok {
+			for _, sub := range subscribers {
+				if sub.UserID == nil || sub.ID == nil {
+					return fmt.Errorf("error expected userId or subId to be defined but got user: %v, sub: %v", sub.UserID, sub.ID)
+				}
+				if sub.LastEpoch != nil {
+					lastSentEpoch := *sub.LastEpoch
+					if lastSentEpoch >= epoch || epoch < sub.CreatedEpoch {
+						continue
+					}
+				}
+				// logger.Infof("creating %v notification for validator %v in epoch %v", types.ValidatorReceivedWithdrawalEventName, event.ValidatorIndex, epoch)
+				n := &validatorWithdrawalNotification{
+					SubscriptionID:  *sub.ID,
+					ValidatorIndex:  event.ValidatorIndex,
+					Epoch:           epoch,
+					Slot:            event.Slot,
+					Amount:          event.Amount,
+					Address:         event.Address,
+					EventFilter:     hex.EncodeToString(event.Pubkey),
+					UnsubscribeHash: sub.UnsubscribeHash,
+				}
+				if _, exists := notificationsByUserID[*sub.UserID]; !exists {
+					notificationsByUserID[*sub.UserID] = map[types.EventName][]types.Notification{}
+				}
+				if _, exists := notificationsByUserID[*sub.UserID][n.GetEventName()]; !exists {
+					notificationsByUserID[*sub.UserID][n.GetEventName()] = []types.Notification{}
+				}
+				notificationsByUserID[*sub.UserID][n.GetEventName()] = append(notificationsByUserID[*sub.UserID][n.GetEventName()], n)
+				metrics.NotificationsCollected.WithLabelValues(string(n.GetEventName())).Inc()
+			}
+		}
+	}
+
+	return nil
+}
+
 type ethClientNotification struct {
 	SubscriptionID  uint64
 	UserID          uint64
@@ -1756,6 +2042,10 @@ type ethClientNotification struct {
 	EthClient       string
 	EventFilter     string
 	UnsubscribeHash sql.NullString
+}
+
+func (n *ethClientNotification) GetLatestState() string {
+	return ""
 }
 
 func (n *ethClientNotification) GetUnsubscribeHash() string {
@@ -1790,8 +2080,6 @@ func (n *ethClientNotification) GetInfo(includeUrl bool) string {
 			url = "https://github.com/ethereum/go-ethereum/releases"
 		case "Nethermind":
 			url = "https://github.com/NethermindEth/nethermind/releases"
-		case "OpenEthereum":
-			url = "https://github.com/openethereum/openethereum/releases"
 		case "Teku":
 			url = "https://github.com/ConsenSys/teku/releases"
 		case "Prysm":
@@ -1804,6 +2092,10 @@ func (n *ethClientNotification) GetInfo(includeUrl bool) string {
 			url = "https://github.com/ledgerwatch/erigon/releases"
 		case "Rocketpool":
 			url = "https://github.com/rocket-pool/smartnode-install/releases"
+		case "MEV-Boost":
+			url = "https://github.com/flashbots/mev-boost/releases"
+		case "Lodestar":
+			url = "https://github.com/chainsafe/lodestar/releases"
 		default:
 			url = "https://beaconcha.in/ethClients"
 		}
@@ -1828,8 +2120,6 @@ func (n *ethClientNotification) GetInfoMarkdown() string {
 		url = "https://github.com/ethereum/go-ethereum/releases"
 	case "Nethermind":
 		url = "https://github.com/NethermindEth/nethermind/releases"
-	case "OpenEthereum":
-		url = "https://github.com/openethereum/openethereum/releases"
 	case "Teku":
 		url = "https://github.com/ConsenSys/teku/releases"
 	case "Prysm":
@@ -1842,6 +2132,10 @@ func (n *ethClientNotification) GetInfoMarkdown() string {
 		url = "https://github.com/ledgerwatch/erigon/releases"
 	case "Rocketpool":
 		url = "https://github.com/rocket-pool/smartnode-install/releases"
+	case "MEV-Boost":
+		url = "https://github.com/flashbots/mev-boost/releases"
+	case "Lodestar":
+		url = "https://github.com/chainsafe/lodestar/releases"
 	default:
 		url = "https://beaconcha.in/ethClients"
 	}
@@ -1900,144 +2194,158 @@ func collectEthClientNotifications(notificationsByUserID map[uint64]map[types.Ev
 	return nil
 }
 
-func collectMonitoringMachineOffline(notificationsByUserID map[uint64]map[types.EventName][]types.Notification) error {
-	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineOfflineEventName,
-		`
-	SELECT 
-		us.user_id,
-		max(us.id) as id,
-		ENCODE((array_agg(us.unsubscribe_hash))[1], 'hex') as unsubscribe_hash,
-		machine
-	FROM users_subscriptions us
-	JOIN (
-		SELECT max(id) as id, user_id, machine, max(created_trunc) as created_trunc from stats_meta_p 
-		WHERE day >= $3 
-		group by user_id, machine
-	) v on v.user_id = us.user_id 
-	WHERE us.event_name = $1 AND us.created_epoch <= $2 
-	AND us.event_filter = v.machine 
-	AND (us.last_sent_epoch < ($2 - 120) OR us.last_sent_epoch IS NULL)
-	AND v.created_trunc < now() - interval '4 minutes' AND v.created_trunc > now() - interval '1 hours'
-	group by us.user_id, machine
-	`)
+type MachineEvents struct {
+	SubscriptionID  uint64         `db:"id"`
+	UserID          uint64         `db:"user_id"`
+	MachineName     string         `db:"machine"`
+	UnsubscribeHash sql.NullString `db:"unsubscribe_hash"`
+	EventThreshold  float64        `db:"event_threshold"`
 }
 
-func collectMonitoringMachineDiskAlmostFull(notificationsByUserID map[uint64]map[types.EventName][]types.Notification) error {
-	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineDiskAlmostFullEventName,
+func collectMonitoringMachineOffline(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, epoch uint64) error {
+	nowTs := time.Now().Unix()
+	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineOfflineEventName, 120,
+		// notify condition
+		func(_ *MachineEvents, machineData *types.MachineMetricSystemUser) bool {
+			if machineData.CurrentDataInsertTs < nowTs-10*60 && machineData.CurrentDataInsertTs > nowTs-90*60 {
+				return true
+			}
+			return false
+		},
+		epoch,
+	)
+}
+
+func isMachineDataRecent(machineData *types.MachineMetricSystemUser) bool {
+	nowTs := time.Now().Unix()
+	return machineData.CurrentDataInsertTs >= nowTs-60*60
+}
+
+func collectMonitoringMachineDiskAlmostFull(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, epoch uint64) error {
+	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineDiskAlmostFullEventName, 750,
+		// notify condition
+		func(subscribeData *MachineEvents, machineData *types.MachineMetricSystemUser) bool {
+			if !isMachineDataRecent(machineData) {
+				return false
+			}
+
+			percentFree := float64(machineData.CurrentData.DiskNodeBytesFree) / float64(machineData.CurrentData.DiskNodeBytesTotal+1)
+			return percentFree < subscribeData.EventThreshold
+		},
+		epoch,
+	)
+}
+
+func collectMonitoringMachineCPULoad(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, epoch uint64) error {
+	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineCpuLoadEventName, 10,
+		// notify condition
+		func(subscribeData *MachineEvents, machineData *types.MachineMetricSystemUser) bool {
+			if !isMachineDataRecent(machineData) {
+				return false
+			}
+
+			if machineData.FiveMinuteOldData == nil { // no compare data found (5 min old data)
+				return false
+			}
+
+			idle := float64(machineData.CurrentData.CpuNodeIdleSecondsTotal) - float64(machineData.FiveMinuteOldData.CpuNodeIdleSecondsTotal)
+			total := float64(machineData.CurrentData.CpuNodeSystemSecondsTotal) - float64(machineData.FiveMinuteOldData.CpuNodeSystemSecondsTotal)
+			percentLoad := float64(1) - (idle / total)
+
+			return percentLoad > subscribeData.EventThreshold
+		},
+		epoch,
+	)
+}
+
+func collectMonitoringMachineMemoryUsage(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, epoch uint64) error {
+	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineMemoryUsageEventName, 10,
+		// notify condition
+		func(subscribeData *MachineEvents, machineData *types.MachineMetricSystemUser) bool {
+			if !isMachineDataRecent(machineData) {
+				return false
+			}
+
+			memFree := float64(machineData.CurrentData.MemoryNodeBytesFree) + float64(machineData.CurrentData.MemoryNodeBytesCached) + float64(machineData.CurrentData.MemoryNodeBytesBuffers)
+			memTotal := float64(machineData.CurrentData.MemoryNodeBytesTotal)
+			memUsage := float64(1) - (memFree / memTotal)
+
+			return memUsage > subscribeData.EventThreshold
+		},
+		epoch,
+	)
+}
+
+func collectMonitoringMachine(
+	notificationsByUserID map[uint64]map[types.EventName][]types.Notification,
+	eventName types.EventName,
+	epochWaitInBetween int,
+	notifyConditionFullfilled func(subscribeData *MachineEvents, machineData *types.MachineMetricSystemUser) bool,
+	epoch uint64,
+) error {
+
+	var allSubscribed []MachineEvents
+	err := db.FrontendWriterDB.Select(&allSubscribed,
 		`SELECT 
 			us.user_id,
 			max(us.id) as id,
 			ENCODE((array_agg(us.unsubscribe_hash))[1], 'hex') as unsubscribe_hash,
-			machine
+			event_filter as machine,
+			COALESCE(event_threshold, 0) as event_threshold
 		FROM users_subscriptions us 
-		INNER JOIN stats_meta_p v ON us.user_id = v.user_id
-		INNER JOIN stats_system sy ON v.id = sy.meta_id
 		WHERE us.event_name = $1 AND us.created_epoch <= $2 
-		AND v.day >= $3 
-		AND v.machine = us.event_filter 
-		AND (us.last_sent_epoch < ($2 - 750) OR us.last_sent_epoch IS NULL)
-		AND sy.disk_node_bytes_free::decimal / sy.disk_node_bytes_total < event_threshold
-		AND v.created_trunc > NOW() - INTERVAL '1 hours' 
-		group by us.user_id, machine
-	`)
-}
-
-func collectMonitoringMachineCPULoad(notificationsByUserID map[uint64]map[types.EventName][]types.Notification) error {
-	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineCpuLoadEventName,
-		`SELECT 
-			max(us.id) as id,
-			us.user_id,
-			ENCODE((array_agg(us.unsubscribe_hash))[1], 'hex') as unsubscribe_hash,
-			machine 
-		FROM users_subscriptions us 
-		INNER JOIN (
-			SELECT max(id) as id, user_id, machine, max(created_trunc) as created_trunc from stats_meta_p
-			where process = 'system' AND day >= $3 
-			group by user_id, machine
-		) v ON us.user_id = v.user_id 
-		WHERE v.machine = us.event_filter 
-		AND us.event_name = $1 AND us.created_epoch <= $2 
-		AND (us.last_sent_epoch < ($2 - 10) OR us.last_sent_epoch IS NULL)
-		AND v.created_trunc > now() - interval '45 minutes' 
-		AND event_threshold < (SELECT 
-			1 - (cpu_node_idle_seconds_total::decimal - lag(cpu_node_idle_seconds_total::decimal, 4, 0::decimal) OVER (PARTITION BY m.user_id, machine ORDER BY sy.id asc)) / (cpu_node_system_seconds_total::decimal - lag(cpu_node_system_seconds_total::decimal, 4, 0::decimal) OVER (PARTITION BY m.user_id, machine ORDER BY sy.id asc)) as cpu_load 
-			FROM stats_system as sy 
-			INNER JOIN stats_meta_p m on meta_id = m.id 
-			WHERE m.id = meta_id 
-			AND m.day >= $3 
-			AND m.user_id = v.user_id 
-			AND m.machine = us.event_filter 
-			ORDER BY sy.id desc
-			LIMIT 1
-		) 
-		group by us.user_id, machine;
-	`)
-}
-
-func collectMonitoringMachineMemoryUsage(notificationsByUserID map[uint64]map[types.EventName][]types.Notification) error {
-	return collectMonitoringMachine(notificationsByUserID, types.MonitoringMachineMemoryUsageEventName,
-		`SELECT 
-			max(us.id) as id,
-			us.user_id,
-			ENCODE((array_agg(us.unsubscribe_hash))[1], 'hex') as unsubscribe_hash,
-			machine 
-		FROM users_subscriptions us 
-		INNER JOIN (
-			SELECT max(id) as id, user_id, machine, max(created_trunc) as created_trunc from stats_meta_p
-			where process = 'system' AND day >= $3 
-			group by user_id, machine
-		) v ON us.user_id = v.user_id 
-		WHERE v.machine = us.event_filter 
-		AND us.event_name = $1 AND us.created_epoch <= $2
-		AND (us.last_sent_epoch < ($2 - 10) OR us.last_sent_epoch IS NULL)
-		AND v.created_trunc > now() - interval '1 hours' 
-		AND event_threshold < (SELECT avg(usage) FROM (SELECT 
-		1 - ((memory_node_bytes_free + memory_node_bytes_cached + memory_node_bytes_buffers) / memory_node_bytes_total::decimal) as usage
-		FROM stats_system as sy 
-		INNER JOIN stats_meta_p m on meta_id = m.id 
-		WHERE m.id = meta_id 
-		AND m.day >= $3 
-		AND m.user_id = v.user_id 
-		AND m.machine = us.event_filter 
-		ORDER BY sy.id desc
-		LIMIT 5
-		) p) 
-		group by us.user_id, machine;
-	`)
-}
-
-func collectMonitoringMachine(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, eventName types.EventName, query string) error {
-	latestEpoch := LatestEpoch()
-	if latestEpoch == 0 {
-		return nil
-	}
-
-	var dbResult []struct {
-		SubscriptionID  uint64         `db:"id"`
-		UserID          uint64         `db:"user_id"`
-		MachineName     string         `db:"machine"`
-		UnsubscribeHash sql.NullString `db:"unsubscribe_hash"`
-	}
-
-	now := time.Now()
-	nowTs := now.Unix()
-	var day int = int(nowTs/86400) - 1 // -1 so we have no issue on partition table change
-
-	err := db.FrontendWriterDB.Select(&dbResult, query, eventName, latestEpoch, day)
+		AND (us.last_sent_epoch < ($2 - $3) OR us.last_sent_epoch IS NULL)
+		group by us.user_id, machine, event_threshold`,
+		eventName, epoch, epochWaitInBetween)
 	if err != nil {
 		return err
 	}
 
-	for _, r := range dbResult {
+	rowKeys := gcp_bigtable.RowList{}
+	for _, data := range allSubscribed {
+		rowKeys = append(rowKeys, db.GetMachineRowKey(data.UserID, "system", data.MachineName))
+	}
+
+	machineDataOfSubscribed, err := db.BigtableClient.GetMachineMetricsForNotifications(rowKeys)
+	if err != nil {
+		return err
+	}
+
+	var result []MachineEvents
+	for _, data := range allSubscribed {
+		machineMap, found := machineDataOfSubscribed[data.UserID]
+		if !found {
+			continue
+		}
+		currentMachineData, found := machineMap[data.MachineName]
+		if !found {
+			continue
+		}
+
+		//logrus.Infof("currentMachineData %v | %v | %v | %v", currentMachine.CurrentDataInsertTs, currentMachine.CompareDataInsertTs, currentMachine.UserID, currentMachine.Machine)
+		if notifyConditionFullfilled(&data, currentMachineData) {
+			result = append(result, data)
+		}
+	}
+
+	// if at least 90% of users would be notified, we expect an issue on our end and no one will be notified
+	const notifiedSubscriptionsRatioThreshold = 0.9
+	if float64(len(result))/float64(len(allSubscribed)) >= notifiedSubscriptionsRatioThreshold {
+		utils.LogError(nil, fmt.Errorf("error too many users would be notified concerning: %v", eventName), 0)
+		return nil
+	}
+
+	for _, r := range result {
+
 		n := &monitorMachineNotification{
 			SubscriptionID:  r.SubscriptionID,
 			MachineName:     r.MachineName,
 			UserID:          r.UserID,
 			EventName:       eventName,
-			Epoch:           latestEpoch,
+			Epoch:           epoch,
 			UnsubscribeHash: r.UnsubscribeHash,
 		}
-
+		//logrus.Infof("notify %v %v", eventName, n)
 		if _, exists := notificationsByUserID[r.UserID]; !exists {
 			notificationsByUserID[r.UserID] = map[types.EventName][]types.Notification{}
 		}
@@ -2058,6 +2366,10 @@ type monitorMachineNotification struct {
 	Epoch           uint64
 	EventName       types.EventName
 	UnsubscribeHash sql.NullString
+}
+
+func (n *monitorMachineNotification) GetLatestState() string {
+	return ""
 }
 
 func (n *monitorMachineNotification) GetUnsubscribeHash() string {
@@ -2135,6 +2447,10 @@ type taxReportNotification struct {
 	UnsubscribeHash sql.NullString
 }
 
+func (n *taxReportNotification) GetLatestState() string {
+	return ""
+}
+
 func (n *taxReportNotification) GetUnsubscribeHash() string {
 	if n.UnsubscribeHash.Valid {
 		return n.UnsubscribeHash.String
@@ -2189,12 +2505,12 @@ func (n *taxReportNotification) GetEventName() types.EventName {
 }
 
 func (n *taxReportNotification) GetInfo(includeUrl bool) string {
-	generalPart := fmt.Sprint(`Please find attached the income history of your selected validators.`)
+	generalPart := `Please find attached the income history of your selected validators.`
 	return generalPart
 }
 
 func (n *taxReportNotification) GetTitle() string {
-	return fmt.Sprint("Income Report")
+	return "Income Report"
 }
 
 func (n *taxReportNotification) GetEventFilter() string {
@@ -2263,6 +2579,10 @@ type networkNotification struct {
 	UnsubscribeHash sql.NullString
 }
 
+func (n *networkNotification) GetLatestState() string {
+	return ""
+}
+
 func (n *networkNotification) GetUnsubscribeHash() string {
 	if n.UnsubscribeHash.Valid {
 		return n.UnsubscribeHash.String
@@ -2292,7 +2612,7 @@ func (n *networkNotification) GetInfo(includeUrl bool) string {
 }
 
 func (n *networkNotification) GetTitle() string {
-	return fmt.Sprint("Beaconchain Network Issues")
+	return "Beaconchain Network Issues"
 }
 
 func (n *networkNotification) GetEventFilter() string {
@@ -2307,7 +2627,7 @@ func (n *networkNotification) GetInfoMarkdown() string {
 func collectNetworkNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, eventName types.EventName) error {
 	count := 0
 	err := db.WriterDb.Get(&count, `
-		select count(ts) from network_liveness where (headepoch-finalizedepoch)!=2 AND ts > now() - interval '20 minutes';
+		select count(ts) from network_liveness where (headepoch-finalizedepoch) > 3 AND ts > now() - interval '60 minutes';
 	`)
 
 	if err != nil {
@@ -2315,7 +2635,6 @@ func collectNetworkNotifications(notificationsByUserID map[uint64]map[types.Even
 	}
 
 	if count > 0 {
-
 		var dbResult []struct {
 			SubscriptionID  uint64         `db:"id"`
 			UserID          uint64         `db:"user_id"`
@@ -2367,6 +2686,10 @@ type rocketpoolNotification struct {
 	UnsubscribeHash sql.NullString
 }
 
+func (n *rocketpoolNotification) GetLatestState() string {
+	return ""
+}
+
 func (n *rocketpoolNotification) GetUnsubscribeHash() string {
 	if n.UnsubscribeHash.Valid {
 		return n.UnsubscribeHash.String
@@ -2395,7 +2718,7 @@ func (n *rocketpoolNotification) GetInfo(includeUrl bool) string {
 	case types.RocketpoolCommissionThresholdEventName:
 		return fmt.Sprintf(`The current RPL commission rate of %v has reached your configured threshold.`, n.ExtraData)
 	case types.RocketpoolNewClaimRoundStartedEventName:
-		return fmt.Sprintf(`A new reward round has started. You can now claim your rewards from the previous round.`)
+		return `A new reward round has started. You can now claim your rewards from the previous round.`
 	case types.RocketpoolColleteralMaxReached:
 		return `Your RPL collateral has reached your configured threshold at 150%.`
 	case types.RocketpoolColleteralMinReached:
@@ -2414,7 +2737,7 @@ func (n *rocketpoolNotification) GetInfo(includeUrl bool) string {
 			inTime = time.Until(utils.EpochToTime(syncStartEpoch))
 		}
 
-		return fmt.Sprintf(`Your validator %v has been elected to be part of the next sync committee. The additional duties start at epoch %v, which is in %s and will last for a day until epoch %v.`, extras[0], extras[1], inTime.Round(time.Second), extras[2])
+		return fmt.Sprintf(`Your validator %v has been elected to be part of the next sync committee. The additional duties start at epoch %v, which is in %s and will last for about a day until epoch %v.`, extras[0], extras[1], inTime.Round(time.Second), extras[2])
 	}
 
 	return ""
@@ -2423,9 +2746,9 @@ func (n *rocketpoolNotification) GetInfo(includeUrl bool) string {
 func (n *rocketpoolNotification) GetTitle() string {
 	switch n.EventName {
 	case types.RocketpoolCommissionThresholdEventName:
-		return fmt.Sprintf(`Rocketpool Commission`)
+		return `Rocketpool Commission`
 	case types.RocketpoolNewClaimRoundStartedEventName:
-		return fmt.Sprintf(`Rocketpool Claim Available`)
+		return `Rocketpool Claim Available`
 	case types.RocketpoolColleteralMaxReached:
 		return `Rocketpool Max Collateral`
 	case types.RocketpoolColleteralMinReached:
@@ -2553,11 +2876,11 @@ func collectRocketpoolRewardClaimRoundNotifications(notificationsByUserID map[ui
 	return nil
 }
 
-func collectRocketpoolRPLCollateralNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, eventName types.EventName) error {
+func collectRocketpoolRPLCollateralNotifications(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, eventName types.EventName, epoch uint64) error {
 
 	pubkeys, subMap, err := db.GetSubsForEventFilter(eventName)
 	if err != nil {
-		return fmt.Errorf("error getting subscriptions for missted attestations %w", err)
+		return fmt.Errorf("error getting subscriptions for RocketpoolRPLCollateral %w", err)
 	}
 
 	type dbResult struct {
@@ -2622,10 +2945,9 @@ func collectRocketpoolRPLCollateralNotifications(notificationsByUserID map[uint6
 			continue
 		}
 
-		currentEpoch := LatestEpoch()
 		if sub.LastEpoch != nil {
 			lastSentEpoch := *sub.LastEpoch
-			if lastSentEpoch >= currentEpoch-80 || currentEpoch < sub.CreatedEpoch {
+			if lastSentEpoch >= epoch-80 || epoch < sub.CreatedEpoch {
 				continue
 			}
 		}
@@ -2633,7 +2955,7 @@ func collectRocketpoolRPLCollateralNotifications(notificationsByUserID map[uint6
 		n := &rocketpoolNotification{
 			SubscriptionID:  *sub.ID,
 			UserID:          *sub.UserID,
-			Epoch:           currentEpoch,
+			Epoch:           epoch,
 			EventFilter:     sub.EventFilter,
 			EventName:       eventName,
 			UnsubscribeHash: sub.UnsubscribeHash,
@@ -2662,7 +2984,7 @@ func (b *BigFloat) Value() (driver.Value, error) {
 
 func (b *BigFloat) Scan(value interface{}) error {
 	if value == nil {
-		return errors.New("Can not cast nil to BigFloat")
+		return errors.New("can not cast nil to BigFloat")
 	}
 
 	switch t := value.(type) {
@@ -2679,7 +3001,7 @@ func (b *BigFloat) Scan(value interface{}) error {
 			return fmt.Errorf("failed to load value to []uint8: %v", value)
 		}
 	default:
-		return fmt.Errorf("Could not scan type %T into BigFloat", t)
+		return fmt.Errorf("could not scan type %T into BigFloat", t)
 	}
 
 	return nil
@@ -2692,10 +3014,10 @@ func bigFloat(x float64) *big.Float {
 	return new(big.Float).SetFloat64(x)
 }
 
-func collectSyncCommittee(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, eventName types.EventName) error {
+func collectSyncCommittee(notificationsByUserID map[uint64]map[types.EventName][]types.Notification, eventName types.EventName, epoch uint64) error {
 
 	slotsPerSyncCommittee := utils.Config.Chain.Config.EpochsPerSyncCommitteePeriod * utils.Config.Chain.Config.SlotsPerEpoch
-	currentPeriod := LatestSlot() / slotsPerSyncCommittee
+	currentPeriod := epoch * utils.Config.Chain.Config.SlotsPerEpoch / slotsPerSyncCommittee
 	nextPeriod := currentPeriod + 1
 
 	var validators []struct {
@@ -2722,13 +3044,12 @@ func collectSyncCommittee(notificationsByUserID map[uint64]map[types.EventName][
 	var dbResult []struct {
 		SubscriptionID  uint64         `db:"id"`
 		UserID          uint64         `db:"user_id"`
-		Epoch           uint64         `db:"created_epoch"`
 		EventFilter     string         `db:"event_filter"`
 		UnsubscribeHash sql.NullString `db:"unsubscribe_hash"`
 	}
 
 	err = db.FrontendWriterDB.Select(&dbResult, `
-				SELECT us.id, us.user_id, us.created_epoch, us.event_filter, ENCODE(us.unsubscribe_hash, 'hex') as unsubscribe_hash
+				SELECT us.id, us.user_id, us.event_filter, ENCODE(us.unsubscribe_hash, 'hex') as unsubscribe_hash
 				FROM users_subscriptions AS us 
 				WHERE us.event_name=$1 AND (us.last_sent_ts <= NOW() - INTERVAL '26 hours' OR us.last_sent_ts IS NULL) AND event_filter = ANY($2);
 				`,
@@ -2743,7 +3064,7 @@ func collectSyncCommittee(notificationsByUserID map[uint64]map[types.EventName][
 		n := &rocketpoolNotification{
 			SubscriptionID:  r.SubscriptionID,
 			UserID:          r.UserID,
-			Epoch:           r.Epoch,
+			Epoch:           epoch,
 			EventFilter:     r.EventFilter,
 			EventName:       eventName,
 			ExtraData:       fmt.Sprintf("%v|%v|%v", mapping[r.EventFilter], nextPeriod*utils.Config.Chain.Config.EpochsPerSyncCommitteePeriod, (nextPeriod+1)*utils.Config.Chain.Config.EpochsPerSyncCommitteePeriod),

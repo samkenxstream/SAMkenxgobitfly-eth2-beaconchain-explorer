@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"eth2-exporter/mail"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
@@ -9,30 +10,27 @@ import (
 	"net/http"
 )
 
-var mobileTemplate = template.Must(template.New("mobilepage").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/mobilepage.html"))
-
 func MobilePage(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "mobilepage.html")
+	var mobileTemplate = templates.GetTemplate(templateFiles...)
+
 	var err error
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "more", "/mobile", "Beaconchain Dashboard")
+	data := InitPageData(w, r, "more", "/mobile", "Beaconchain Dashboard", templateFiles)
 	pageData := &types.AdvertiseWithUsPageData{}
 	pageData.RecaptchaKey = utils.Config.Frontend.RecaptchaSiteKey
 
 	pageData.FlashMessage, err = utils.GetFlash(w, r, "ad_flash")
 	if err != nil {
 		logger.Errorf("error retrieving flashes for mobile page %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	data.Data = pageData
-	data.HeaderAd = true
 
-	err2 := mobileTemplate.ExecuteTemplate(w, "layout", data)
-	if err2 != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err2)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "mobilepage.go", "MobilePage", "", mobileTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
@@ -56,7 +54,7 @@ func MobilePagePost(w http.ResponseWriter, r *http.Request) {
 		valid, err := utils.ValidateReCAPTCHA(r.FormValue("g-recaptcha-response"))
 		if err != nil || !valid {
 			utils.SetFlash(w, r, "pricing_flash", "Error: Failed to create request")
-			logger.Errorf("error validating recaptcha %v route: %v", r.URL.String(), err)
+			logger.Warnf("error validating recaptcha %v route: %v", r.URL.String(), err)
 			http.Redirect(w, r, "/pricing", http.StatusSeeOther)
 			return
 		}

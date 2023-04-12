@@ -25,11 +25,10 @@ type rewardHistory struct {
 
 func GetValidatorHist(validatorArr []uint64, currency string, start uint64, end uint64) rewardHistory {
 	var err error
-	validatorFilter := pq.Array(validatorArr)
 
 	var pricesDb []types.Price
 	err = db.WriterDb.Select(&pricesDb,
-		`select * from price where ts >= TO_TIMESTAMP($1) and ts <= TO_TIMESTAMP($2) order by ts desc`, start, end)
+		`select ts, eur, usd, gbp, cad, jpy, cny, rub, aud from price where ts >= TO_TIMESTAMP($1) and ts <= TO_TIMESTAMP($2) order by ts desc`, start, end)
 	if err != nil {
 		logger.Errorf("error getting prices: %v", err)
 	}
@@ -37,14 +36,9 @@ func GetValidatorHist(validatorArr []uint64, currency string, start uint64, end 
 	lowerBound := utils.TimeToDay(start)
 	upperBound := utils.TimeToDay(end)
 
-	var income []types.ValidatorStatsTableRow
-	err = db.WriterDb.Select(&income,
-		`select day, start_balance, end_balance
-		 from validator_stats 
-		 where validatorindex=ANY($1) AND day > $2 AND day <= $3
-		 order by day desc`, validatorFilter, lowerBound, upperBound)
+	income, _, err := db.GetValidatorIncomeHistory(validatorArr, lowerBound+1, upperBound)
 	if err != nil {
-		logger.Errorf("error getting incomes: %v", err)
+		logger.Errorf("error getting income history for validator hist: %v", err)
 	}
 
 	prices := map[string]float64{}
@@ -74,40 +68,24 @@ func GetValidatorHist(validatorArr []uint64, currency string, start uint64, end 
 		}
 	}
 
-	totalIncomePerDay := map[string][2]int64{}
-	for _, item := range income {
-		date := fmt.Sprintf("%v", utils.DayToTime(item.Day))
-		date = strings.Split(date, " ")[0]
-		if _, exist := totalIncomePerDay[date]; !exist {
-			totalIncomePerDay[date] = [2]int64{item.StartBalance.Int64, item.EndBalance.Int64}
-			continue
-		}
-		state := totalIncomePerDay[date]
-		state[0] += item.StartBalance.Int64
-		state[1] += item.EndBalance.Int64
-		totalIncomePerDay[date] = state
-	}
-
-	data := make([][]string, len(totalIncomePerDay))
-	i := 0
+	data := make([][]string, len(income))
 	tETH := 0.0
 	tCur := 0.0
-	for key, item := range totalIncomePerDay {
-		if len(item) < 2 {
-			continue
-		}
-		iETH := (float64(item[1]) / 1e9) - (float64(item[0]) / 1e9)
+
+	for i, item := range income {
+		key := fmt.Sprintf("%v", utils.DayToTime(item.Day))
+		key = strings.Split(key, " ")[0]
+		iETH := float64(item.ClRewards) / 1e9
 		tETH += iETH
-		iCur := ((float64(item[1]) / 1e9) - (float64(item[0]) / 1e9)) * prices[key]
+		iCur := iETH * prices[key]
 		tCur += iCur
 		data[i] = []string{
 			key,
-			addCommas(float64(item[1])/1e9, "%.5f"), // end of day balance
-			addCommas(iETH, "%.5f"),                 // income of day ETH
+			addCommas(float64(item.EndBalance.Int64)/1e9, "%.5f"),                           // end of day balance
+			addCommas(iETH, "%.5f"),                                                         // income of day ETH
 			fmt.Sprintf("%s %s", strings.ToUpper(currency), addCommas(prices[key], "%.2f")), //price will default to 0 if key does not exist
 			fmt.Sprintf("%s %s", strings.ToUpper(currency), addCommas(iCur, "%.2f")),        // income of day Currency
 		}
-		i++
 	}
 
 	return rewardHistory{
@@ -134,7 +112,7 @@ func addCommas(balance float64, decimals string) string {
 	return string(rb)
 }
 
-func GeneratePdfReport(hist rewardHistory) []byte {
+func GeneratePdfReport(hist rewardHistory, currency string) []byte {
 
 	data := hist.History
 
@@ -145,6 +123,10 @@ func GeneratePdfReport(hist rewardHistory) []byte {
 
 	sort.Slice(data, func(p, q int) bool {
 		i, err := time.Parse("2006-01-02", data[p][0])
+		if err != nil {
+			return false
+		}
+
 		i2, err := time.Parse("2006-01-02", data[q][0])
 		if err != nil {
 			return false
@@ -179,9 +161,9 @@ func GeneratePdfReport(hist rewardHistory) []byte {
 	pdf.SetTextColor(24, 24, 24)
 	pdf.SetFillColor(255, 255, 255)
 	// pdf.Ln(-1)
-	pdf.CellFormat(0, maxHt, fmt.Sprintf("Total Income ETH %s | %s", hist.TotalETH, hist.TotalCurrency), "", 0, "CM", true, 0, "")
+	pdf.CellFormat(0, maxHt, fmt.Sprintf("Income For Timeframe %s | %s", hist.TotalETH, hist.TotalCurrency), "", 0, "CM", true, 0, "")
 
-	header := [colCount]string{"Date", "End-of-date balance ETH", "Income for date ETH", "Price of ETH for date", "Income for date"}
+	header := [colCount]string{"Date", "Balance", "Income", "ETH Value", fmt.Sprintf("Income (%v)", currency)}
 
 	// pdf.SetMargins(marginH, marginH, marginH)
 	pdf.Ln(10)
@@ -239,7 +221,7 @@ func GeneratePdfReport(hist rewardHistory) []byte {
 	pdf.Ln(10)
 	pdf.SetFont("Times", "", 9)
 
-	header = [colCount]string{"Index", "Balance Activation ETH", "Balance ETH", "Income ETH", "Last Attestation"}
+	header = [colCount]string{"Index", "Activation Balance", "Balance", "Income", "Last Attestation"}
 
 	// pdf.SetMargins(marginH, marginH, marginH)
 	// pdf.Ln(10)
@@ -298,20 +280,38 @@ func GeneratePdfReport(hist rewardHistory) []byte {
 
 func GetPdfReport(validatorArr []uint64, currency string, start uint64, end uint64) []byte {
 	hist := GetValidatorHist(validatorArr, currency, start, end)
-	return GeneratePdfReport(hist)
+	return GeneratePdfReport(hist, currency)
 }
 
 func getValidatorDetails(validators []uint64) [][]string {
 	validatorFilter := pq.Array(validators)
 	var data []types.ValidatorPageData
 	err := db.WriterDb.Select(&data,
-		`select validatorindex, balanceactivation, balance, lastattestationslot
+		`select validatorindex, balanceactivation, lastattestationslot
 		 from validators 
 		 where validatorindex=ANY($1)
 		 order by validatorindex asc`, validatorFilter)
 	if err != nil {
 		logger.Errorf("error getting validators Data: %v", err)
 		return [][]string{}
+	}
+
+	balances, err := db.BigtableClient.GetValidatorBalanceHistory(validators, LatestEpoch(), LatestEpoch())
+	if err != nil {
+		logger.Errorf("error getting validator balance data for getValidatorDetails function: %v", err)
+		return [][]string{}
+	}
+
+	for _, validator := range data {
+		for balanceIndex, balance := range balances {
+			if len(balance) == 0 {
+				continue
+			}
+			if validator.ValidatorIndex == balanceIndex {
+				validator.CurrentBalance = balance[0].Balance
+				validator.EffectiveBalance = balance[0].EffectiveBalance
+			}
+		}
 	}
 
 	result := [][]string{}

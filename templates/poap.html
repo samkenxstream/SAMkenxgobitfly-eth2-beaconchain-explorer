@@ -1,194 +1,210 @@
 {{ define "js" }}
   <script type="text/javascript" src="/js/datatables.min.js"></script>
   <script type="text/javascript" src="/js/datatable_input.js"></script>
-    <script>
-        var clients = {{.PoapClients}}
-        var graffitiFlagData = {
-            address: "",
-            client: "prysm"
-        }
-        var hexRE = /^[0-9A-F]{40}$/i
-        var clientRefs = ['prysm-graffiti', 'lighthouse-graffiti', 'teku-graffiti', 'nimbus-graffiti', 'lodestar-graffiti']
+  <script>
+    var clients = {{ .PoapClients }}
+    var graffitiFlagData = {
+      address: "",
+      client: "prysm",
+    }
+    var hexRE = /^[0-9A-F]{40}$/i
+    var clientRefs = ["prysm-graffiti", "lighthouse-graffiti", "teku-graffiti", "nimbus-graffiti", "lodestar-graffiti"]
 
-        function setAddress(addr) {
-            graffitiFlagData.address = addr
-            renderFlag()
-        }
+    function setAddress(addr) {
+      graffitiFlagData.address = addr
+      renderFlag()
+    }
 
-        /* function setClient(client) {
+    /* function setClient(client) {
          	graffitiFlagData.client = client
          	renderFlag()
         } */
 
-        setAddress('')
+    setAddress("")
 
-        function renderFlag() {
-            var clientId = ''
-            for (var i = 0; i < clientRefs.length; i++) {
-                var ref = clientRefs[i]
-                clientId = ('00' + (i).toString(16)).substr(-2)
-                /* if (clientId === '') {
+    function renderFlag() {
+      var clientId = ""
+      for (var i = 0; i < clientRefs.length; i++) {
+        var ref = clientRefs[i]
+        clientId = ("00" + i.toString(16)).substr(-2)
+        /* if (clientId === '') {
                  	console.error('invalid client: '+graffitiFlagData.client)
                  	log('invalid client: '+graffitiFlagData.client)
                  	return
                 } */
-                var addr = graffitiFlagData.address
-                if (addr.length === 0) {
-                    log('Enter Address Above', ref)
-                    continue;
-                }
-                if (addr.substring(0, 2) === '0x') addr = addr.slice(2)
-                if (addr.length !== 40 || !hexRE.test(addr)) {
-                    console.error('invalid address: ' + graffitiFlagData.address, addr, addr.length, hexRE.test(addr))
-                    log('invalid address', ref)
-                    continue;
-                }
-                var flagHex = addr + clientId
-                var flagB64 = btoa(flagHex.match(/\w{2}/g).map(function(a) {
-                    return String.fromCharCode(parseInt(a, 16))
-                }).join(""))
-                // console.log(flagHex, flagB64, b64ToHex(flagB64))
-                document.getElementById(ref).innerText = 'poap' + flagB64
-                document.getElementById('copy-' + ref).setAttribute('data-clipboard-text', 'poap' + flagB64)
-                document.getElementById(ref).classList.remove('text-muted')
-                document.getElementById("copy-" + ref).classList.remove('d-none')
-            }
+        var addr = graffitiFlagData.address
+        if (addr.length === 0) {
+          log("Enter Address Above", ref)
+          continue
         }
-
-        function addrClientToFlag(addr, client) {
-            var clientId = ('00' + (client).toString(16)).substr(-2)
-            var flagHex = addr + clientId
-            return "poap" + btoa(flagHex.match(/\w{2}/g).map(function (a) {
-                return String.fromCharCode(parseInt(a, 16))
-            }).join(""))
+        if (addr.substring(0, 2) === "0x") addr = addr.slice(2)
+        if (addr.length !== 40 || !hexRE.test(addr)) {
+          console.error("invalid address: " + graffitiFlagData.address, addr, addr.length, hexRE.test(addr))
+          log("invalid address", ref)
+          continue
         }
-
-        function b64ToHex(str) {
-            var raw = atob(str)
-            let res = ''
-            for (let i = 0; i < raw.length; i++) {
-                const hex = raw.charCodeAt(i).toString(16)
-                res += (hex.length === 2 ? hex : '0' + hex)
-            }
-            return res
-        }
-
-        function log(msg, ref) {
-            document.getElementById(ref).innerText = msg
-            if (msg === "Enter Address Above") {
-                document.getElementById(ref).classList.add('text-muted')
-                document.getElementById("copy-" + ref).classList.add('d-none')
-            }
-        }
-
-        $(document).ready(function() {
-            var columnDefs = [{
-                orderable: false,
-                targets: [0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-            },
-            {
-                targets: 0,
-                data: '0',
-                createdCell: function(td, cellData, rowData, row, col) {
-                    $(td).css('display', 'flex')
-                    $(td).css('align-items', 'center')
-                    $(td).css('justify-content', 'space-between')
-                },
-                render: function(data, type, row) {
-                    return `<a style="display: inline-block; max-width: 130px;" class="text-truncate" href="https://etherchain.org/account/${data}">${data}</a><i style="padding: .25rem;" class="fa fa-copy text-muted" role="button" data-toggle="tooltip" title="Copy to clipboard" data-clipboard-text="${data}"></i>`
-                }
-            },
-            {
-                targets: 1,
-                data: '1',
-                render: function(data, type, row) {
-                    if (data == 0) return 0
-                    return `<a href="/blocks?q=${encodeURIComponent(addrClientToFlag(row[0].slice(2), 0).substr(0, 31))}">${data}</a>`
-                }
-            }]
-            for (var i = 0; i < clients.length; i++) {
-                columnDefs.push({
-                    targets: i * 2 + 3,
-                    data: (i * 2 + 3) + '',
-                    render: function(i) {
-                        return function(data, type, row) {
-                            if (data == 0) return 0
-                            return `<a href="/blocks?q=${encodeURIComponent(addrClientToFlag(row[0].slice(2), i))}">${data}</a>`
-                        }
-                    }(i)
-                })
-            }
-            var poapTable = $('#poap-table').DataTable({
-                processing: true,
-                serverSide: false,
-                order: [[2, 'desc']],
-                searching: true,
-                columnDefs: columnDefs,
-                // ajax: '/poap/data',
-                pagingType: 'input',
-                language: {
-                    searchPlaceholder: 'Search by ETH1 Address',
-                    search: '',
-                    paginate: {
-                        previous: '<i class="fas fa-chevron-left"></i>',
-                        next: '<i class="fas fa-chevron-right"></i>'
-                    }
-                },
-                drawCallback: function(settings) {
-                    $('[data-toggle="tooltip"]').tooltip()
-                }
+        var flagHex = addr + clientId
+        var flagB64 = btoa(
+          flagHex
+            .match(/\w{2}/g)
+            .map(function (a) {
+              return String.fromCharCode(parseInt(a, 16))
             })
+            .join("")
+        )
+        // console.log(flagHex, flagB64, b64ToHex(flagB64))
+        document.getElementById(ref).innerText = "poap" + flagB64
+        document.getElementById("copy-" + ref).setAttribute("data-clipboard-text", "poap" + flagB64)
+        document.getElementById(ref).classList.remove("text-muted")
+        document.getElementById("copy-" + ref).classList.remove("d-none")
+      }
+    }
 
-            $.ajax({
-                url: '/poap/data',
-                success: function(result) {
-                    if (!result || !result.data.length) {
-                        document.getElementById('poap-table').style.display = 'none'
-                        return
-                    }
-                    poapTable.clear()
-                    poapTable.rows.add(result.data).draw()
-                    requestAnimationFrame(() => {
-                        poapTable.columns.adjust()
-                    })
-                }
+    function addrClientToFlag(addr, client) {
+      var clientId = ("00" + client.toString(16)).substr(-2)
+      var flagHex = addr + clientId
+      return (
+        "poap" +
+        btoa(
+          flagHex
+            .match(/\w{2}/g)
+            .map(function (a) {
+              return String.fromCharCode(parseInt(a, 16))
             })
+            .join("")
+        )
+      )
+    }
 
-            /* var data = []
+    function b64ToHex(str) {
+      var raw = atob(str)
+      let res = ""
+      for (let i = 0; i < raw.length; i++) {
+        const hex = raw.charCodeAt(i).toString(16)
+        res += hex.length === 2 ? hex : "0" + hex
+      }
+      return res
+    }
+
+    function log(msg, ref) {
+      document.getElementById(ref).innerText = msg
+      if (msg === "Enter Address Above") {
+        document.getElementById(ref).classList.add("text-muted")
+        document.getElementById("copy-" + ref).classList.add("d-none")
+      }
+    }
+
+    $(document).ready(function () {
+      var columnDefs = [
+        {
+          orderable: false,
+          targets: [0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        },
+        {
+          targets: 0,
+          data: "0",
+          createdCell: function (td, cellData, rowData, row, col) {
+            $(td).css("display", "flex")
+            $(td).css("align-items", "center")
+            $(td).css("justify-content", "space-between")
+          },
+          render: function (data, type, row) {
+            return `<a style="display: inline-block; max-width: 130px;" class="text-truncate" href="/address/${data}">${data}</a><i style="padding: .25rem;" class="fa fa-copy text-muted" role="button" data-toggle="tooltip" title="Copy to clipboard" data-clipboard-text="${data}"></i>`
+          },
+        },
+        {
+          targets: 1,
+          data: "1",
+          render: function (data, type, row) {
+            if (data == 0) return 0
+            return `<a href="/blocks?q=${encodeURIComponent(addrClientToFlag(row[0].slice(2), 0).substr(0, 31))}">${data}</a>`
+          },
+        },
+      ]
+      for (var i = 0; i < clients.length; i++) {
+        columnDefs.push({
+          targets: i * 2 + 3,
+          data: i * 2 + 3 + "",
+          render: (function (i) {
+            return function (data, type, row) {
+              if (data == 0) return 0
+              return `<a href="/blocks?q=${encodeURIComponent(addrClientToFlag(row[0].slice(2), i))}">${data}</a>`
+            }
+          })(i),
+        })
+      }
+      var poapTable = $("#poap-table").DataTable({
+        stateSave: true,
+        processing: true,
+        serverSide: false,
+        order: [[2, "desc"]],
+        searching: true,
+        columnDefs: columnDefs,
+        // ajax: '/poap/data',
+        pagingType: "input",
+        language: {
+          searchPlaceholder: "Search by ETH Address",
+          search: "",
+          paginate: {
+            previous: '<i class="fas fa-chevron-left"></i>',
+            next: '<i class="fas fa-chevron-right"></i>',
+          },
+        },
+        drawCallback: function (settings) {
+          $('[data-toggle="tooltip"]').tooltip()
+        },
+      })
+
+      $.ajax({
+        url: "/poap/data",
+        success: function (result) {
+          if (!result || !result.data.length) {
+            document.getElementById("poap-table").style.display = "none"
+            return
+          }
+          poapTable.clear()
+          poapTable.rows.add(result.data).draw()
+          requestAnimationFrame(() => {
+            poapTable.columns.adjust()
+          })
+        },
+      })
+
+      /* var data = []
             for (var i=0; i<1000; i++) {
              	data.push(['0x'+genHexString(40),Math.random()*100|0,Math.random()*100|0,Math.random()*100|0,Math.random()*100|0,Math.random()*100|0,Math.random()*100|0,Math.random()*100|0,Math.random()*100|0,Math.random()*100|0,Math.random()*100|0])
             }
             poapTable.rows.add(data).draw() */
-        })
+    })
 
-        function genHexString(len) {
-            const hex = '0123456789ABCDEF'
-            let output = ''
-            for (let i = 0; i < len; ++i) {
-                output += hex.charAt(Math.floor(Math.random() * hex.length))
-            }
-            return output
-        }
+    function genHexString(len) {
+      const hex = "0123456789ABCDEF"
+      let output = ""
+      for (let i = 0; i < len; ++i) {
+        output += hex.charAt(Math.floor(Math.random() * hex.length))
+      }
+      return output
+    }
 
-        function createCopyButton(id) {
-            var clipboard = new ClipboardJS(id)
-            var copyButton = $(id)
+    function createCopyButton(id) {
+      var clipboard = new ClipboardJS(id)
+      var copyButton = $(id)
 
-            clipboard.on('success', function(e) {
-                copyButton.find('span').removeClass('fa-copy').removeClass('fa').addClass('fas').addClass('fa-check')
-                setTimeout(function() {
-                    copyButton.find('span').removeClass('fas').removeClass('fa-check').addClass('fa').addClass('fa-copy')
-                }, 500)
-            });
-        }
+      clipboard.on("success", function (e) {
+        copyButton.find("span").removeClass("fa-copy").removeClass("fa").addClass("fas").addClass("fa-check")
+        setTimeout(function () {
+          copyButton.find("span").removeClass("fas").removeClass("fa-check").addClass("fa").addClass("fa-copy")
+        }, 500)
+      })
+    }
 
-        $(document).ready(function() {
-            for (let i = 0; i < clientRefs.length; i++) {
-                const client = clientRefs[i]
-                createCopyButton('#copy-' + client)
-            }
-        })
-    </script>
+    $(document).ready(function () {
+      for (let i = 0; i < clientRefs.length; i++) {
+        const client = clientRefs[i]
+        createCopyButton("#copy-" + client)
+      }
+    })
+  </script>
 {{ end }}
 
 {{ define "css" }}
@@ -233,31 +249,31 @@
       </div>
       <div class="row">
         <div class="col-md-12">
-          <p>To celebrate the much anticipated launch of the <a href="https://launchpad.ethereum.org/">Ethereum 2.0 beacon chain</a>, the <a href="https://invite.gg/ethstaker">ETHStakers community </a> with assistance of <a href="https://poap.xyz">Proof of Attendance Protocol</a> are issuing a set of special NFTs. There are 3 different tokens:</p>
+          <p>To celebrate the much anticipated launch of the <a href="https://launchpad.ethereum.org/">Ethereum beacon chain</a>, the <a href="https://invite.gg/ethstaker">ETHStakers community </a> with assistance of <a href="https://poap.xyz">Proof of Attendance Protocol</a> are issuing a set of special NFTs. There are 3 different tokens:</p>
           <p>
             <b>There are 3 different tokens</b>
           </p>
           <p><b>Genesis depositor:</b> Anyone who deposits 32 ETH on the deposit contract.</p>
-          <p><b>Block Proposer 1 - 1024:</b> Validators that propose one of the first 1024 blocks and have to have an encoded ETH1 address on the graffiti field</p>
-          <p><b>Block Proposer 1 - 32768:</b> Validators that propose one of the the first 32768 blocks and have to have an encoded ETH1 address on the graffiti field.</p>
+          <p><b>Block Proposer 1 - 1024:</b> Validators that propose one of the first 1024 blocks and have to have an encoded ETH address on the graffiti field</p>
+          <p><b>Block Proposer 1 - 32768:</b> Validators that propose one of the the first 32768 blocks and have to have an encoded ETH address on the graffiti field.</p>
           <h2 class="h5">What is POAP?</h2>
           <p>The Proof of Attendance Protocol is a dapp that distributes badges in the form of ERC-721 tokens to prove you participated in an event. More info on the dapp and the multiclient token can be found <a href="https://app.poap.xyz/scan/poap.eth">here</a>.</p>
           <h2 class="h5">How will it work?</h2>
 
           <ol class="poap-how-list">
-            <li>Install an Eth2.0 client and set up a node and validator.</li>
-            <li>Add the Eth1.0 (Mainnet) address you want to receive the badge within the field provided.</li>
+            <li>Install an Ethereum consensus & execution layer client and set up a node and validator.</li>
+            <li>Add the Ethereum (Mainnet) address you want to receive the badge within the field provided.</li>
             <li>Add the generated graffiti flag to your validator client.</li>
             <li>
               If you propose a block between genesis and block
               <ins>32768</ins>
-              , your Eth1.0 address will be recorded on the beacon-chain, and you will be able to claim a token with that address using POAPs website.
+              , your Eth address will be recorded on the beacon-chain, and you will be able to claim a token with that address using POAPs website.
             </li>
             <li>The tokens will be distributed via a mechanism called a <a href="https://blog.ricmoo.com/merkle-air-drops-e6406945584d">merkle drop</a>. This is like an airdrop, but badges are only distributed to those who actively claim them reducing state bloat and chain congestion.</li>
           </ol>
 
           <h2 class="h5">Generate the flag for you validator:</h2>
-          <!-- <input id="address-input" oninput="setAddress(this.value);" class="from-control my-2" type="text" placeholder="ETH1 Address (eg: 0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B)"></input> -->
+          <!-- <input id="address-input" oninput="setAddress(this.value);" class="from-control my-2" type="text" placeholder="ETH Address (eg: 0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B)"></input> -->
           <div style="flex-direction: row-reverse;" class="row">
             <div class="d-flex col-lg-6 justify-content-center align-items-center">
               <svg height="240px" viewBox="0 0 1681 2156" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -399,7 +415,7 @@
           </div>
         </div>
       </div>
-      <h2 class="h5">Ethereum 2.0 Mainnet Leaderboard</h2>
+      <h2 class="h5">Ethereum Mainnet Leaderboard</h2>
 
       <div class="card" style="margin: 1rem 0;">
         <div class="card-body px-0 py-1">
@@ -407,7 +423,7 @@
             <table style="width:fit-content" class="table" id="poap-table">
               <thead>
                 <tr>
-                  <th rowspan="2">ETH1 Address</th>
+                  <th rowspan="2">ETH Address</th>
                   <th colspan="2">Total</th>
                   {{ range $i, $client := .PoapClients }}
                     <th colspan="2">{{ $client }}</th>

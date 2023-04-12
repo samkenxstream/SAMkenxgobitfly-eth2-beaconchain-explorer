@@ -5,18 +5,16 @@ import (
 	"encoding/json"
 	"eth2-exporter/db"
 	"eth2-exporter/services"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
-	"html/template"
 	"net/http"
 	"strconv"
 	"sync/atomic"
 
 	eth1common "github.com/ethereum/go-ethereum/common"
 )
-
-var poapTemplate = template.Must(template.New("poap").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/poap.html"))
 
 // do not change existing entries, only append new entries
 var poapClients = []string{"Prysm", "Lighthouse", "Teku", "Nimbus", "Lodestar"}
@@ -26,21 +24,20 @@ var poapData atomic.Value
 var poapDataEpoch uint64
 
 func Poap(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "poap.html")
+	var poapTemplate = templates.GetTemplate(templateFiles...)
+
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "more", "/poap", "POAP")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "more", "/poap", "POAP", templateFiles)
 	data.Data = struct {
 		PoapClients []string
 	}{
 		PoapClients: poapClients,
 	}
 
-	err := poapTemplate.ExecuteTemplate(w, "layout", data)
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "poap.go", "Poap", "", poapTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
@@ -55,7 +52,7 @@ func PoapData(w http.ResponseWriter, r *http.Request) {
 		err := json.NewEncoder(w).Encode(latestPoapData.(*types.DataTableResponse))
 		if err != nil {
 			logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-			http.Error(w, "Internal server error", 503)
+			http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 			return
 		}
 		return
@@ -76,7 +73,7 @@ func PoapData(w http.ResponseWriter, r *http.Request) {
 		group by graffiti`, poapMaxSlot)
 	if err != nil {
 		logger.Errorf("error retrieving poap data: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -129,7 +126,7 @@ func PoapData(w http.ResponseWriter, r *http.Request) {
 	err = json.NewEncoder(w).Encode(data)
 	if err != nil {
 		logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 }

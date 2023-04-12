@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"eth2-exporter/db"
 	"eth2-exporter/mail"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
@@ -13,34 +14,14 @@ import (
 	"github.com/gorilla/csrf"
 )
 
-var pricingTemplate = template.Must(template.New("pricing").Funcs(utils.GetTemplateFuncs()).ParseFiles(
-	"templates/layout.html",
-	"templates/payment/pricing.html",
-	"templates/svg/pricing.html",
-))
-
-var mobilePricingTemplate = template.Must(template.New("mobilepricing").Funcs(utils.GetTemplateFuncs()).ParseFiles(
-	"templates/layout.html",
-	"templates/payment/mobilepricing.html",
-	"templates/svg/mobilepricing.html",
-))
-
-var successTemplate = template.Must(template.New("success").Funcs(utils.GetTemplateFuncs()).ParseFiles(
-	"templates/layout.html",
-	"templates/payment/success.html",
-))
-
-var cancelTemplate = template.Must(template.New("cancled").Funcs(utils.GetTemplateFuncs()).ParseFiles(
-	"templates/layout.html",
-	"templates/payment/cancled.html",
-))
-
 func Pricing(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "payment/pricing.html", "svg/pricing.html")
+	var pricingTemplate = templates.GetTemplate(templateFiles...)
 	var err error
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "pricing", "/pricing", "API Pricing")
+	data := InitPageData(w, r, "pricing", "/pricing", "API Pricing", templateFiles)
 
 	pageData := &types.ApiPricing{}
 	pageData.RecaptchaKey = utils.Config.Frontend.RecaptchaSiteKey
@@ -50,7 +31,7 @@ func Pricing(w http.ResponseWriter, r *http.Request) {
 	pageData.FlashMessage, err = utils.GetFlash(w, r, "pricing_flash")
 	if err != nil {
 		logger.Errorf("error retrieving flashes for advertisewithusform %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -58,7 +39,7 @@ func Pricing(w http.ResponseWriter, r *http.Request) {
 		subscription, err := db.StripeGetUserSubscription(data.User.UserID, utils.GROUP_API)
 		if err != nil {
 			logger.Errorf("error retrieving user subscriptions %v", err)
-			http.Error(w, "Internal server error", 503)
+			http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 			return
 		}
 		pageData.Subscription = subscription
@@ -71,20 +52,20 @@ func Pricing(w http.ResponseWriter, r *http.Request) {
 
 	data.Data = pageData
 
-	err = pricingTemplate.ExecuteTemplate(w, "layout", data)
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "pricing.go", "Pricing", "", pricingTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
 func MobilePricing(w http.ResponseWriter, r *http.Request) {
+
+	templateFiles := append(layoutTemplateFiles, "payment/mobilepricing.html", "svg/mobilepricing.html")
+	var mobilePricingTemplate = templates.GetTemplate(templateFiles...)
+
 	var err error
 
 	w.Header().Set("Content-Type", "text/html")
-
-	data := InitPageData(w, r, "premium", "/premium", "Premium Pricing")
+	data := InitPageData(w, r, "premium", "/premium", "Premium Pricing", templateFiles)
 
 	pageData := &types.MobilePricing{}
 	pageData.RecaptchaKey = utils.Config.Frontend.RecaptchaSiteKey
@@ -94,7 +75,7 @@ func MobilePricing(w http.ResponseWriter, r *http.Request) {
 	pageData.FlashMessage, err = utils.GetFlash(w, r, "pricing_flash")
 	if err != nil {
 		logger.Errorf("error retrieving flashes for advertisewithusform %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -102,7 +83,7 @@ func MobilePricing(w http.ResponseWriter, r *http.Request) {
 		subscription, err := db.StripeGetUserSubscription(data.User.UserID, utils.GROUP_MOBILE)
 		if err != nil {
 			logger.Errorf("error retrieving user subscriptions %v", err)
-			http.Error(w, "Internal server error", 503)
+			http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 			return
 		}
 		pageData.Subscription = subscription
@@ -110,7 +91,7 @@ func MobilePricing(w http.ResponseWriter, r *http.Request) {
 		premiumSubscription, err := db.GetUserPremiumSubscription(data.User.UserID)
 		if err != nil && err != sql.ErrNoRows {
 			logger.Errorf("error retrieving user subscriptions %v", err)
-			http.Error(w, "Internal server error", 503)
+			http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 			return
 		}
 		pageData.ActiveMobileStoreSub = premiumSubscription.Active
@@ -123,11 +104,8 @@ func MobilePricing(w http.ResponseWriter, r *http.Request) {
 
 	data.Data = pageData
 
-	err = mobilePricingTemplate.ExecuteTemplate(w, "layout", data)
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "pricing.go", "MobilePricing", "", mobilePricingTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
@@ -153,7 +131,7 @@ func PricingPost(w http.ResponseWriter, r *http.Request) {
 		valid, err := utils.ValidateReCAPTCHA(r.FormValue("g-recaptcha-response"))
 		if err != nil || !valid {
 			utils.SetFlash(w, r, "pricing_flash", "Error: Failed to create request")
-			logger.Errorf("error validating recaptcha %v route: %v", r.URL.String(), err)
+			logger.Warnf("error validating recaptcha %v route: %v", r.URL.String(), err)
 			http.Redirect(w, r, "/pricing", http.StatusSeeOther)
 			return
 		}

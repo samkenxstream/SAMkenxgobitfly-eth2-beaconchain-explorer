@@ -8,9 +8,33 @@
         serverSide: true,
         ordering: false,
         searching: true,
+        deferLoading: {{.RecordsTotal}},
         ajax: "/epochs/data",
         pagingType: "input",
-        pageLength: 50,
+        stateSave: true,
+        stateSaveCallback: function (settings, data) {
+
+          data.search.search = ""
+          data.order = []
+          data.start = 0
+          data.columns = []
+          data.key = `${settings.sTableId}`
+          fetch('/tables/state', {
+            method: "POST",
+            body: JSON.stringify(data),
+          })
+          .then(res => res.json())
+          .then(({ status, data }) => {
+            if (status !== "OK") {
+              console.error("error updating table state, err:", data, "status: ", status)
+            }
+          }).catch(err => {
+            console.error("error updating table state, err: ", err)
+          })
+        },
+        stateDuration: true,
+        pageLength: {{.PageLength}},
+        displayStart: {{.DisplayStart}},
         language: {
           searchPlaceholder: "Search by Epoch Number",
           search: "",
@@ -26,12 +50,15 @@
           } catch (e) {
             console.error(e)
           }
+          document.getElementById('header-placeholder').style.display = 'none'
+          document.getElementById('footer-placeholder').style.display = 'none'
+
         },
         drawCallback: function (settings) {
           formatTimestamps()
         },
       })
-      $("div.toolbar").html("<b>Custom tool bar! Text/images etc.</b>")
+      // $("div.toolbar").html("<b>Custom tool bar! Text/images etc.</b>")
     })
   </script>
 {{ end }}
@@ -50,30 +77,40 @@
           </ol>
         </nav>
       </div>
-      <div class="card">
+      <div class="card mt-2">
+        <div id="header-placeholder" style="height:45px;"></div>
         <div class="card-body px-0 py-3">
           <div class="table-responsive px-0 py-1">
             <table class="table" id="epochs">
               <thead>
                 <tr>
                   <th>Epoch</th>
-                  <th>Time</th>
+                  <th style="min-width: 125px">Time</th>
                   <th>Attestations</th>
-                  <th>Deposits</th>
+                  <th>
+                    <span data-toggle="tooltip" data-placement="top" title="Deposits">D<span class="d-none d-xl-inline">eposits</span> <i class="d-xl-none far fa-arrow-alt-circle-down"></i></span> / <span data-toggle="tooltip" data-placement="top" title="Withdrawals">W<span class="d-none d-lg-inline">ithdrawals</span> <i class="d-lg-none far fa-arrow-alt-circle-up"></i></span>
+                  </th>
                   <th>Slashings <span data-toggle="tooltip" data-placement="top" title="Proposers">P</span> / <span data-toggle="tooltip" data-placement="top" title="Attesters">A</span></th>
                   <th>Finalized</th>
                   <th>Eligible</th>
                   <th>Voted</th>
                 </tr>
               </thead>
-              <tbody></tbody>
+              <tbody>
+                {{ range $i, $row := .Data }}
+                  <tr>
+                    {{ range $j, $col := $row }}
+                      <td>{{ $col }}</td>
+                    {{ end }}
+                  </tr>
+                {{ end }}
+              </tbody>
             </table>
           </div>
         </div>
+        <div id="footer-placeholder" style="height:71px;"></div>
       </div>
-      <div class="d-flex justify-content-between py-2">
-        <ins data-revive-zoneid="1" data-revive-id="5b200397ccf8a9353bf44ef99b45268c"></ins>
-      </div>
+      <div id="r-banner" info="{{ $.Meta.Templates }}"></div>
     </div>
   {{ end }}
 {{ end }}

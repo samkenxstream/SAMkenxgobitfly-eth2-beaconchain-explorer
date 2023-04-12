@@ -8,7 +8,7 @@ import (
 
 func UpdatePubkeyTag() {
 	logger.Infoln("Started Pubkey Tags Updater")
-	for true {
+	for {
 		start := time.Now()
 
 		tx, err := db.WriterDb.Beginx()
@@ -29,11 +29,11 @@ func UpdatePubkeyTag() {
 
 		err = tx.Commit()
 		if err != nil {
-			logger.WithError(err).Error("Error commiting transaction")
+			logger.WithError(err).Error("Error committing transaction")
 		}
 		tx.Rollback()
 
-		logger.Infof("Updating Pubkey Tags took %v sec.", time.Now().Sub(start).Seconds())
+		logger.Infof("Updating Pubkey Tags took %v sec.", time.Since(start).Seconds())
 		metrics.TaskDuration.WithLabelValues("validator_pubkey_tag_updater").Observe(time.Since(start).Seconds())
 
 		time.Sleep(time.Minute * 10)

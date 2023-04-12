@@ -3,30 +3,26 @@ package handlers
 import (
 	"encoding/json"
 	"eth2-exporter/db"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
-	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
 )
 
-var validatorsStreakLeaderboardTemplate = template.Must(template.New("validators").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/validators_streakleaderboard.html"))
-
 // ValidatorsStreaksLeaderboard returns the attestation-streak-leaderboard using a go template
 func ValidatorsStreakLeaderboard(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "validators_streakleaderboard.html")
+	var validatorsStreakLeaderboardTemplate = templates.GetTemplate(templateFiles...)
+
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "validators", "/validators/streaksleaderboard", "Validator Streaks Leaderboard")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "validators", "/validators/streaksleaderboard", "Validator Streaks Leaderboard", templateFiles)
 
-	err := validatorsStreakLeaderboardTemplate.ExecuteTemplate(w, "layout", data)
-
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "validators_streakLeaderboard.go", "ValidatorsStreakLeaderboard", "", validatorsStreakLeaderboardTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
@@ -45,19 +41,19 @@ func ValidatorsStreakLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	draw, err := strconv.ParseUint(q.Get("draw"), 10, 64)
 	if err != nil {
 		logger.Errorf("error converting datatables data parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	start, err := strconv.ParseUint(q.Get("start"), 10, 64)
 	if err != nil {
 		logger.Errorf("error converting datatables start parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	length, err := strconv.ParseUint(q.Get("length"), 10, 64)
 	if err != nil {
 		logger.Errorf("error converting datatables length parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	if length > 100 {
@@ -159,7 +155,7 @@ func ValidatorsStreakLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		logger.Errorf("error retrieving streaksData data (search=%v): %v", search != "", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	if len(sqlData) > 0 {
@@ -195,7 +191,7 @@ func ValidatorsStreakLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	err = json.NewEncoder(w).Encode(data)
 	if err != nil {
 		logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 }

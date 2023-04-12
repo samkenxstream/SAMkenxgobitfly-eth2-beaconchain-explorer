@@ -56,7 +56,6 @@ type EthClientServicesPageData struct {
 	LastUpdate          time.Time
 	Geth                EthClients
 	Nethermind          EthClients
-	OpenEthereum        EthClients
 	Besu                EthClients
 	Teku                EthClients
 	Prysm               EthClients
@@ -64,6 +63,8 @@ type EthClientServicesPageData struct {
 	Lighthouse          EthClients
 	Erigon              EthClients
 	RocketpoolSmartnode EthClients
+	MevBoost            EthClients
+	Lodestar            EthClients
 	Banner              string
 	CsrfField           template.HTML
 }
@@ -127,7 +128,7 @@ func getRepoTime(date string, dTime string) (time.Time, error) {
 	dateDays := strings.Split(date, "-")
 	dateTimes := strings.Split(dTime, ":")
 	if len(dateDays) < 3 || len(dateTimes) < 3 {
-		return time.Now(), fmt.Errorf("Invalid date string %s %s", date, dTime)
+		return time.Now(), fmt.Errorf("invalid date string %s %s", date, dTime)
 	}
 	year, err = strconv.ParseInt(dateDays[0], 10, 0)
 	if err != nil {
@@ -183,7 +184,7 @@ func prepareEthClientData(repo string, name string, curTime time.Time) (string, 
 		}
 
 		if timeDiff <= 1.5 && timeDiff >= 1.0 {
-			return client.Name, fmt.Sprintf("1 day ago")
+			return client.Name, "1 day ago"
 		}
 
 		if timeDiff > 30 {
@@ -207,8 +208,6 @@ func updateEthClientNetShare() {
 		switch item.Client {
 		case "geth":
 			ethClients.Geth.NetworkShare = share
-		case "openethereum":
-			ethClients.OpenEthereum.NetworkShare = share
 		case "nethermind":
 			ethClients.Nethermind.NetworkShare = share
 		case "besu":
@@ -238,7 +237,6 @@ func updateEthClient() {
 	updateEthClientNetShare()
 	ethClients.Geth.ClientReleaseVersion, ethClients.Geth.ClientReleaseDate = prepareEthClientData("/ethereum/go-ethereum", "Geth", curTime)
 	ethClients.Nethermind.ClientReleaseVersion, ethClients.Nethermind.ClientReleaseDate = prepareEthClientData("/NethermindEth/nethermind", "Nethermind", curTime)
-	ethClients.OpenEthereum.ClientReleaseVersion, ethClients.OpenEthereum.ClientReleaseDate = prepareEthClientData("/openethereum/openethereum", "OpenEthereum", curTime)
 	ethClients.Besu.ClientReleaseVersion, ethClients.Besu.ClientReleaseDate = prepareEthClientData("/hyperledger/besu", "Besu", curTime)
 	ethClients.Erigon.ClientReleaseVersion, ethClients.Erigon.ClientReleaseDate = prepareEthClientData("/ledgerwatch/erigon", "Erigon", curTime)
 
@@ -246,20 +244,22 @@ func updateEthClient() {
 	ethClients.Prysm.ClientReleaseVersion, ethClients.Prysm.ClientReleaseDate = prepareEthClientData("/prysmaticlabs/prysm", "Prysm", curTime)
 	ethClients.Nimbus.ClientReleaseVersion, ethClients.Nimbus.ClientReleaseDate = prepareEthClientData("/status-im/nimbus-eth2", "Nimbus", curTime)
 	ethClients.Lighthouse.ClientReleaseVersion, ethClients.Lighthouse.ClientReleaseDate = prepareEthClientData("/sigp/lighthouse", "Lighthouse", curTime)
+	ethClients.Lodestar.ClientReleaseVersion, ethClients.Lodestar.ClientReleaseDate = prepareEthClientData("/chainsafe/lodestar", "Lodestar", curTime)
 
 	ethClients.RocketpoolSmartnode.ClientReleaseVersion, ethClients.RocketpoolSmartnode.ClientReleaseDate = prepareEthClientData("/rocket-pool/smartnode-install", "Rocketpool", curTime)
+	ethClients.MevBoost.ClientReleaseVersion, ethClients.MevBoost.ClientReleaseDate = prepareEthClientData("/flashbots/mev-boost", "MEV-Boost", curTime)
 
 	ethClients.LastUpdate = curTime
 }
 
 func update() {
-	for true {
+	for {
 		updateEthClient()
 		time.Sleep(time.Minute * 5)
 	}
 }
 
-// GetEthClientData returns a pointer of EthClientServicesPageData
+// GetEthClientData returns a EthClientServicesPageData
 func GetEthClientData() EthClientServicesPageData {
 	ethClientsMux.Lock()
 	defer ethClientsMux.Unlock()
@@ -270,13 +270,10 @@ func GetEthClientData() EthClientServicesPageData {
 func ClientsUpdated() bool {
 	bannerClientsMux.Lock()
 	defer bannerClientsMux.Unlock()
-	if len(bannerClients) == 0 {
-		return false
-	}
-	return true
+	return len(bannerClients) != 0
 }
 
-//GetUpdatedClients returns a slice of latest updated clients or empty slice if no updates
+// GetUpdatedClients returns a slice of latest updated clients or empty slice if no updates
 func GetUpdatedClients() []clientUpdateInfo {
 	bannerClientsMux.Lock()
 	defer bannerClientsMux.Unlock()

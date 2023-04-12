@@ -1,13 +1,13 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +19,7 @@ import (
 var FrontendReaderDB *sqlx.DB
 var FrontendWriterDB *sqlx.DB
 
-func MustInitFrontendDB(writer *types.DatabaseConfig, reader *types.DatabaseConfig, sessionSecret string) {
+func MustInitFrontendDB(writer *types.DatabaseConfig, reader *types.DatabaseConfig) {
 	FrontendWriterDB, FrontendReaderDB = mustInitDB(writer, reader)
 }
 
@@ -130,7 +130,7 @@ func CreateAPIKey(userID uint64) error {
 		return err
 	}
 
-	key, err := utils.GenerateAPIKey(u.Password, u.Email, fmt.Sprint(u.RegisterTs.Unix()))
+	key, err := utils.GenerateRandomAPIKey()
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func GetUserAuthDataByAuthorizationCode(code string) (*types.OAuthCodeData, erro
 	return nil, errors.New("no rows found")
 }
 
-// GetByRefreshToken basically used to confirm the claimed user id with the refresh token. Returns the userId if successfull
+// GetByRefreshToken basically used to confirm the claimed user id with the refresh token. Returns the userId if successful
 func GetByRefreshToken(claimUserID, claimAppID, claimDeviceID uint64, hashedRefreshToken string) (uint64, error) {
 	var userID uint64
 	err := FrontendWriterDB.Get(&userID,
@@ -229,7 +229,7 @@ func GetUserDevicesByUserID(userID uint64) ([]types.PairedDevice, error) {
 	if len(data) > 0 {
 		return data, nil
 	}
-	return nil, errors.New("no rows found")
+	return nil, nil
 }
 
 // InsertUserDevice Insert user device and return device id
@@ -260,7 +260,7 @@ func AddSubscription(userID uint64, network string, eventName types.EventName, e
 	nowEpoch := utils.TimeToEpoch(now)
 
 	var onConflictDo string = "NOTHING"
-	if strings.HasPrefix(string(eventName), "monitoring_") || eventName == types.RocketpoolColleteralMaxReached || eventName == types.RocketpoolColleteralMinReached {
+	if strings.HasPrefix(string(eventName), "monitoring_") || eventName == types.RocketpoolColleteralMaxReached || eventName == types.RocketpoolColleteralMinReached || eventName == types.ValidatorIsOfflineEventName {
 		onConflictDo = "UPDATE SET event_threshold = $6"
 	}
 
@@ -282,6 +282,16 @@ func DeleteSubscription(userID uint64, network string, eventName types.EventName
 	}
 
 	_, err := FrontendWriterDB.Exec("DELETE FROM users_subscriptions WHERE user_id = $1 and event_name = $2 and event_filter = $3", userID, name, eventFilter)
+	return err
+}
+
+func DeleteAllSubscription(userID uint64, network string, eventName types.EventName) error {
+	name := string(eventName)
+	if network != "" && !types.IsUserIndexed(eventName) {
+		name = strings.ToLower(network) + ":" + string(eventName)
+	}
+
+	_, err := FrontendWriterDB.Exec("DELETE FROM users_subscriptions WHERE user_id = $1 and event_name = $2", userID, name)
 	return err
 }
 
@@ -397,6 +407,22 @@ func UpdateUserSubscription(tx *sql.Tx, id uint64, valid bool, expiration int64,
 	return err
 }
 
+func SetSubscriptionToExpired(tx *sql.Tx, id uint64) error {
+	var err error
+	query := "UPDATE users_app_subscriptions SET validate_remotely = false, reject_reason = 'expired' WHERE id = $1;"
+	if tx == nil {
+		_, err = FrontendWriterDB.Exec(query,
+			id,
+		)
+	} else {
+		_, err = tx.Exec(query,
+			id,
+		)
+	}
+
+	return err
+}
+
 func GetUserPushTokenByIds(ids []uint64) (map[uint64][]string, error) {
 	pushByID := map[uint64][]string{}
 	if len(ids) == 0 {
@@ -441,7 +467,7 @@ func MobileDeviceSettingsUpdate(userID, deviceID uint64, notifyEnabled, active s
 	}
 
 	if query == "" {
-		return nil, errors.New("No params for change provided")
+		return nil, errors.New("no params for change provided")
 	}
 
 	rows, err := FrontendWriterDB.Query("UPDATE users_devices SET "+query+" WHERE user_id = $1 AND id = $2 RETURNING notify_enabled;",
@@ -471,209 +497,6 @@ func MobileDeviceSettingsSelect(userID, deviceID uint64) (*sql.Rows, error) {
 	return rows, err
 }
 
-func CleanupOldMachineStats() error {
-	const deleteLIMIT uint64 = 60000 // 200 users make 36000 new inserts per hour
-
-	now := time.Now()
-	nowTs := now.Unix()
-	var today int = int(nowTs / 86400)
-
-	dayRange := 32
-	day := int(today - dayRange)
-
-	deleteCondition := "SELECT COALESCE(min(id), 0) from stats_meta_p where day <= $1"
-	deleteConditionGeneral := "SELECT COALESCE(min(id), 0) from stats_process where meta_id <= $1"
-
-	var metaID uint64
-	row := FrontendWriterDB.QueryRow(deleteCondition, day)
-	err := row.Scan(&metaID)
-	if err != nil {
-		return err
-	}
-
-	var generalID uint64
-	row = FrontendWriterDB.QueryRow(deleteConditionGeneral, metaID)
-	err = row.Scan(&generalID)
-	if err != nil {
-		return err
-	}
-	metaID += deleteLIMIT
-	generalID += deleteLIMIT
-
-	tx, err := FrontendWriterDB.Begin()
-
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	_, err = tx.Exec("DELETE FROM stats_system WHERE id IN (SELECT id from stats_system where meta_id <= $1 ORDER BY meta_id asc)", metaID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec("DELETE FROM stats_add_beaconnode WHERE id IN (SELECT id from stats_add_beaconnode WHERE general_id <= $1 ORDER BY general_id asc)", generalID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec("DELETE FROM stats_add_validator WHERE id IN (SELECT id from stats_add_validator WHERE general_id <= $1 ORDER BY general_id asc)", generalID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec("DELETE FROM stats_process WHERE id IN (SELECT id FROM stats_process WHERE id <= $1 ORDER BY id asc)", generalID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec("DELETE FROM stats_meta_p WHERE day < $2 AND id IN (SELECT id from stats_meta_p where day < $2 AND id <= $1 ORDER BY id asc)", metaID, day)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec("DROP TABLE IF EXISTS stats_meta_" + strconv.Itoa(day-2))
-	if err != nil {
-		return err
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func GetStatsMachineCount(userID uint64) (uint64, error) {
-	now := time.Now()
-	nowTs := now.Unix()
-	var day int = int(nowTs / 86400)
-
-	var count uint64
-	row := FrontendWriterDB.QueryRow(
-		"SELECT COUNT(DISTINCT sub.machine) as count FROM (SELECT machine from stats_meta_p WHERE day = $2 AND user_id = $1 AND created_trunc + '15 minutes'::INTERVAL > 'now' LIMIT 15) sub",
-		userID, day,
-	)
-	err := row.Scan(&count)
-	return count, err
-}
-
-func GetStatsMachine(userID uint64) ([]string, error) {
-	now := time.Now()
-	nowTs := now.Unix()
-	var day int = int(nowTs / 86400)
-	// log.Println("current day: ", day)
-	// for testing
-	// day := 18893
-	// log.Println("getting machine for day: ", day)
-
-	var machines []string
-	err := FrontendWriterDB.Select(&machines,
-		"SELECT DISTINCT machine from stats_meta_p WHERE day = $2 AND user_id = $1 LIMIT 300",
-		userID, day,
-	)
-	return machines, err
-}
-
-func InsertStatsMeta(tx *sql.Tx, userID uint64, data *types.StatsMeta) (uint64, error) {
-	now := time.Now()
-	nowTs := now.Unix()
-	var day int = int(nowTs / 86400)
-
-	var id uint64
-	row := tx.QueryRow(
-		"INSERT INTO stats_meta_p (user_id, machine, ts, version, process, created_trunc, exporter_version, day) VALUES($1, $2, TO_TIMESTAMP($3), $4, $5, date_trunc('minute', TO_TIMESTAMP($6)), $7, $8) RETURNING id",
-		userID, data.Machine, data.Timestamp, data.Version, data.Process, nowTs, data.ExporterVersion, day,
-	)
-	err := row.Scan(&id)
-
-	return id, err
-}
-
-func CreateNewStatsMetaPartition() error {
-
-	now := time.Now()
-	nowTs := now.Unix()
-	var day int = int(nowTs / 86400)
-
-	partitionName := "stats_meta_" + strconv.Itoa(day)
-	logger.Info("creating new partition table " + partitionName)
-
-	_, err := FrontendWriterDB.Exec("CREATE TABLE " + partitionName + " PARTITION OF stats_meta_p FOR VALUES IN (" + strconv.Itoa(day) + ")")
-	if err != nil {
-		logger.Errorf("error creating partition %v", err)
-		return err
-	}
-	_, err = FrontendWriterDB.Exec("CREATE UNIQUE INDEX " + partitionName + "_user_id_created_trunc_process_machine_key ON public." + partitionName + " USING btree (user_id, created_trunc, process, machine)")
-	if err != nil {
-		logger.Errorf("error creating index %v", err)
-		return err
-	}
-
-	return err
-}
-
-func InsertStatsSystem(tx *sql.Tx, meta_id uint64, data *types.StatsSystem) (uint64, error) {
-	var id uint64
-	row := tx.QueryRow(
-		"INSERT INTO stats_system (meta_id, cpu_cores, cpu_threads, cpu_node_system_seconds_total, "+
-			"cpu_node_user_seconds_total, cpu_node_iowait_seconds_total, cpu_node_idle_seconds_total,"+
-			"memory_node_bytes_total, memory_node_bytes_free, memory_node_bytes_cached, memory_node_bytes_buffers,"+
-			"disk_node_bytes_total, disk_node_bytes_free, disk_node_io_seconds, disk_node_reads_total, disk_node_writes_total,"+
-			"network_node_bytes_total_receive, network_node_bytes_total_transmit, misc_node_boot_ts_seconds, misc_os"+
-			") "+
-			"VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id",
-		meta_id, data.CPUCores, data.CPUThreads, data.CPUNodeSystemSecondsTotal, data.CPUNodeUserSecondsTotal,
-		data.CPUNodeIowaitSecondsTotal, data.CPUNodeIdleSecondsTotal, data.MemoryNodeBytesTotal, data.MemoryNodeBytesFree,
-		data.MemoryNodeBytesCached, data.MemoryNodeBytesBuffers, data.DiskNodeBytesTotal, data.DiskNodeBytesFree,
-		data.DiskNodeIoSeconds, data.DiskNodeReadsTotal, data.DiskNodeWritesTotal, data.NetworkNodeBytesTotalReceive,
-		data.NetworkNodeBytesTotalTransmit, data.MiscNodeBootTsSeconds, data.MiscOS,
-	)
-	err := row.Scan(&id)
-	return id, err
-}
-
-func InsertStatsProcessGeneral(tx *sql.Tx, meta_id uint64, data *types.StatsProcess) (uint64, error) {
-	var id uint64
-	row := tx.QueryRow(
-		"INSERT INTO stats_process (meta_id, cpu_process_seconds_total, memory_process_bytes, client_name, client_version,"+
-			"client_build, sync_eth2_fallback_configured,"+
-			"sync_eth2_fallback_connected"+
-			") "+
-			"VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-		meta_id, data.CPUProcessSecondsTotal, data.MemoryProcessBytes, data.ClientName, data.ClientVersion, data.ClientBuild,
-		data.SyncEth2FallbackConfigured, data.SyncEth2FallbackConnected,
-	)
-	err := row.Scan(&id)
-	return id, err
-}
-
-func InsertStatsValidator(tx *sql.Tx, general_id uint64, data *types.StatsAdditionalsValidator) (uint64, error) {
-	var id uint64
-	_, err := tx.Exec(
-		"INSERT INTO stats_add_validator (general_id, validator_total, validator_active) "+
-			"VALUES($1, $2, $3)",
-		general_id, data.ValidatorTotal, data.ValidatorActive,
-	)
-
-	return id, err
-}
-
-func InsertStatsBeaconnode(tx *sql.Tx, general_id uint64, data *types.StatsAdditionalsBeaconnode) (uint64, error) {
-	var id uint64
-	_, err := tx.Exec(
-		"INSERT INTO stats_add_beaconnode (general_id, disk_beaconchain_bytes_total, network_libp2p_bytes_total_receive,"+
-			"network_libp2p_bytes_total_transmit, network_peers_connected, sync_eth1_connected, sync_eth2_synced,"+
-			"sync_beacon_head_slot, sync_eth1_fallback_configured, sync_eth1_fallback_connected"+
-			") "+
-			"VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-		general_id, data.DiskBeaconchainBytesTotal, data.NetworkLibp2pBytesTotalReceive, data.NetworkLibp2pBytesTotalTransmit,
-		data.NetworkPeersConnected, data.SyncEth1Connected, data.SyncEth2Synced, data.SyncBeaconHeadSlot, data.SyncEth1FallbackConfigured, data.SyncEth1FallbackConnected,
-	)
-	return id, err
-}
-
 func NewTransaction() (*sql.Tx, error) {
 	return FrontendWriterDB.Begin()
 }
@@ -695,51 +518,6 @@ func getMachineStatsGap(resultCount uint64) int {
 		return 2
 	}
 	return 1
-}
-
-func getMaxDay(limit uint64) int {
-	now := time.Now()
-	nowTs := now.Unix()
-	var day int = int(nowTs / 86400)
-
-	dayRange := int(limit/1440) + 1
-	return day - dayRange
-}
-
-func GetStatsValidator(userID, limit, offset uint64) (*sql.Rows, error) {
-	gapSize := getMachineStatsGap(limit)
-	maxDay := getMaxDay(limit)
-	row, err := FrontendWriterDB.Query(
-		"SELECT t.* FROM (SELECT client_name, client_version, cpu_process_seconds_total, machine, memory_process_bytes, sync_eth2_fallback_configured, sync_eth2_fallback_connected, ts as timestamp, validator_active, validator_total, row_number() OVER(ORDER BY stats_meta_p.id desc) as row FROM stats_add_validator LEFT JOIN stats_process ON stats_add_validator.general_id = stats_process.id "+
-			" LEFT JOIN stats_meta_p on stats_process.meta_id = stats_meta_p.id "+
-			"WHERE stats_meta_p.day >= $5 AND user_id = $1 AND process = 'validator' ORDER BY stats_meta_p.id desc LIMIT $2 OFFSET $3) t where t.row % $4 = 0",
-		userID, limit, offset, gapSize, maxDay,
-	)
-	return row, err
-}
-
-func GetStatsNode(userID, limit, offset uint64) (*sql.Rows, error) {
-	gapSize := getMachineStatsGap(limit)
-	maxDay := getMaxDay(limit)
-	row, err := FrontendWriterDB.Query(
-		"SELECT t.* FROM (SELECT client_name, client_version, cpu_process_seconds_total, machine, memory_process_bytes, sync_eth1_fallback_configured, sync_eth1_fallback_connected, sync_eth2_fallback_configured, sync_eth2_fallback_connected, ts as timestamp, disk_beaconchain_bytes_total, network_libp2p_bytes_total_receive, network_libp2p_bytes_total_transmit, network_peers_connected, sync_eth1_connected, sync_eth2_synced, sync_beacon_head_slot, row_number() OVER(ORDER BY stats_meta_p.id desc) as row FROM stats_add_beaconnode left join stats_process on stats_process.id = stats_add_beaconnode.general_id "+
-			" LEFT JOIN stats_meta_p on stats_process.meta_id = stats_meta_p.id "+
-			"WHERE stats_meta_p.day >= $5 AND user_id = $1 AND process = 'beaconnode' ORDER BY stats_meta_p.id desc LIMIT $2 OFFSET $3) t where t.row % $4 = 0",
-		userID, limit, offset, gapSize, maxDay,
-	)
-	return row, err
-}
-
-func GetStatsSystem(userID, limit, offset uint64) (*sql.Rows, error) {
-	gapSize := getMachineStatsGap(limit)
-	maxDay := getMaxDay(limit)
-	row, err := FrontendWriterDB.Query(
-		"SELECT t.* FROM (SELECT cpu_cores, cpu_threads, cpu_node_system_seconds_total, cpu_node_user_seconds_total, cpu_node_iowait_seconds_total, cpu_node_idle_seconds_total, memory_node_bytes_total, memory_node_bytes_free, memory_node_bytes_cached, memory_node_bytes_buffers, disk_node_bytes_total, disk_node_bytes_free, disk_node_io_seconds, disk_node_reads_total, disk_node_writes_total, network_node_bytes_total_receive, network_node_bytes_total_transmit, misc_os, misc_node_boot_ts_seconds, ts as timestamp, machine, row_number() OVER(ORDER BY stats_meta_p.id desc) as row from stats_system"+
-			" LEFT JOIN stats_meta_p on stats_system.meta_id = stats_meta_p.id "+
-			"WHERE stats_meta_p.day >= $5 AND user_id = $1 AND process = 'system' ORDER BY stats_meta_p.id desc LIMIT $2 OFFSET $3) t where t.row % $4 = 0",
-		userID, limit, offset, gapSize, maxDay,
-	)
-	return row, err
 }
 
 func GetHistoricPrices(currency string) (map[uint64]float64, error) {
@@ -771,7 +549,7 @@ func GetHistoricPrices(currency string) (map[uint64]float64, error) {
 func GetUserAPIKeyStatistics(apikey *string) (*types.ApiStatistics, error) {
 	stats := &types.ApiStatistics{}
 
-	query := fmt.Sprintf(`
+	query := `
 	SELECT (
 		SELECT 
 			COALESCE(SUM(count), 0) as daily 
@@ -786,7 +564,7 @@ func GetUserAPIKeyStatistics(apikey *string) (*types.ApiStatistics, error) {
 			api_statistics 
 		WHERE 
 			ts > NOW() - INTERVAL '1 month' AND apikey = $1
-	)`)
+	)`
 
 	err := FrontendWriterDB.Get(stats, query, apikey)
 	if err != nil {
@@ -799,8 +577,8 @@ func GetUserAPIKeyStatistics(apikey *string) (*types.ApiStatistics, error) {
 func GetSubsForEventFilter(eventName types.EventName) ([][]byte, map[string][]types.Subscription, error) {
 	var subs []types.Subscription
 	subQuery := `
-		SELECT id, user_id, event_filter, last_sent_epoch, created_epoch, event_threshold, ENCODE(unsubscribe_hash, 'hex') as unsubscribe_hash from users_subscriptions where event_name = $1
-	`
+		SELECT id, user_id, event_filter, last_sent_epoch, created_epoch, event_threshold, ENCODE(unsubscribe_hash, 'hex') as unsubscribe_hash, internal_state from users_subscriptions where event_name = $1
+		`
 
 	subMap := make(map[string][]types.Subscription, 0)
 	err := FrontendWriterDB.Select(&subs, subQuery, utils.GetNetwork()+":"+string(eventName))
@@ -820,10 +598,71 @@ func GetSubsForEventFilter(eventName types.EventName) ([][]byte, map[string][]ty
 			EventFilter:    sub.EventFilter,
 			CreatedEpoch:   sub.CreatedEpoch,
 			EventThreshold: sub.EventThreshold,
+			State:          sub.State,
 		})
 
 		b, _ := hex.DecodeString(sub.EventFilter)
 		filtersEncode = append(filtersEncode, b)
 	}
 	return filtersEncode, subMap, nil
+}
+
+// SaveDataTableState saves the state of the current datatable state update
+func SaveDataTableState(user uint64, key string, state types.DataTableSaveState) error {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	// check how many table states are stored
+	count := 0
+	err := FrontendReaderDB.GetContext(ctx, &count, `
+		SELECT count(*)
+		FROM users_datatable
+		WHERE user_id = $1
+	`, user)
+	if err != nil {
+		return err
+	}
+
+	// only store the most recent 100 table states across all networks
+	if count > 100 {
+		_, err := FrontendWriterDB.ExecContext(ctx, `
+			DELETE FROM users_datatable 
+			WHERE user_id = $1 
+			ORDER by updated_at asc 
+			LIMIT 10
+		`)
+		if err != nil {
+			return err
+		}
+	}
+	// append network prefix
+	key = utils.GetNetwork() + ":" + key
+
+	_, err = FrontendWriterDB.ExecContext(ctx, `
+		INSERT INTO 
+			users_datatable (user_id, key, state) 
+		VALUES ($1, $2, $3) 
+		ON CONFLICT (user_id, key) DO UPDATE SET state = $3, updated_at = now()
+	`, user, key, state)
+
+	return err
+}
+
+// GetDataTablesState retrieves the state for a given user and table
+func GetDataTablesState(user uint64, key string) (*types.DataTableSaveState, error) {
+	var state types.DataTableSaveState
+
+	// append network prefix
+	key = utils.GetNetwork() + ":" + key
+
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	err := FrontendReaderDB.GetContext(ctx, &state, `
+		SELECT state 
+		FROM users_datatable
+		WHERE user_id = $1 and key = $2
+	`, user, key)
+
+	return &state, err
 }

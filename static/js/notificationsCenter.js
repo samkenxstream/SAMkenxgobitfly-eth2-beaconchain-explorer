@@ -1,6 +1,6 @@
 var csrfToken = ""
 
-const VALIDATOR_EVENTS = ["validator_attestation_missed", "validator_proposal_missed", "validator_proposal_submitted", "validator_got_slashed", "validator_synccommittee_soon"]
+const VALIDATOR_EVENTS = ["validator_attestation_missed", "validator_proposal_missed", "validator_proposal_submitted", "validator_got_slashed", "validator_synccommittee_soon", "validator_is_offline", "validator_withdrawal"]
 
 // const MONITORING_EVENTS = ['monitoring_machine_offline', 'monitoring_hdd_almostfull', 'monitoring_cpu_load']
 
@@ -12,7 +12,7 @@ function create_typeahead(input_container) {
       return obj.index
     },
     remote: {
-      url: "/search/indexed_validators/%QUERY",
+      url: "/search/validators/%QUERY",
       wildcard: "%QUERY",
     },
   })
@@ -20,10 +20,32 @@ function create_typeahead(input_container) {
     datumTokenizer: Bloodhound.tokenizers.whitespace,
     queryTokenizer: Bloodhound.tokenizers.whitespace,
     identify: function (obj) {
-      return obj.name
+      return obj.validator_indices.join(",")
     },
     remote: {
       url: "/search/indexed_validators_by_name/%QUERY",
+      wildcard: "%QUERY",
+    },
+  })
+  var bhGraffiti = new Bloodhound({
+    datumTokenizer: Bloodhound.tokenizers.whitespace,
+    queryTokenizer: Bloodhound.tokenizers.whitespace,
+    identify: function (obj) {
+      return obj.graffiti
+    },
+    remote: {
+      url: "/search/indexed_validators_by_graffiti/%QUERY",
+      wildcard: "%QUERY",
+    },
+  })
+  var bhEth1Addresses = new Bloodhound({
+    datumTokenizer: Bloodhound.tokenizers.whitespace,
+    queryTokenizer: Bloodhound.tokenizers.whitespace,
+    identify: function (obj) {
+      return obj.eth1_address
+    },
+    remote: {
+      url: "/search/indexed_validators_by_eth1_addresses/%QUERY",
       wildcard: "%QUERY",
     },
   })
@@ -42,7 +64,7 @@ function create_typeahead(input_container) {
       templates: {
         header: '<h5 class="font-weight-bold ml-3">Validators</h5>',
         suggestion: function (data) {
-          return `<div class="font-weight-normal text-truncate high-contrast">${data.index}</div>`
+          return `<div class="font-weight-normal text-truncate high-contrast">${data.index}: ${data.pubkey}</div>`
         },
       },
     },
@@ -50,12 +72,44 @@ function create_typeahead(input_container) {
       limit: 5,
       name: "name",
       source: bhName,
-      display: "name",
+      display: function (data) {
+        return data && data.validator_indices && data.validator_indices.length ? data.validator_indices.join(",") : ""
+      },
       templates: {
         header: '<h5 class="font-weight-bold ml-3">Validators by Name</h5>',
         suggestion: function (data) {
-          var len = data.validator_indices.length > VALLIMIT ? VALLIMIT + "+" : data.validator_indices.length
+          var len = data.validator_indices.length > 10 ? 10 + "+" : data.validator_indices.length
           return `<div class="font-weight-normal high-contrast" style="display: flex;"><div class="text-truncate" style="flex: 1 1 auto;">${data.name}</div><div style="max-width: fit-content; white-space: nowrap;">${len}</div></div>`
+        },
+      },
+    },
+    {
+      limit: 5,
+      name: "addresses",
+      source: bhEth1Addresses,
+      display: function (data) {
+        return data && data.validator_indices && data.validator_indices.length ? data.validator_indices.join(",") : ""
+      },
+      templates: {
+        header: '<h5 class="font-weight-bold ml-3">ETH Address</h5>',
+        suggestion: function (data) {
+          var len = data.validator_indices.length > 10 ? 10 + "+" : data.validator_indices.length
+          return `<div class="text-monospace high-contrast" style="display:flex"><div class="text-truncate" style="flex:1 1 auto;">${data.eth1_address}</div><div style="max-width:fit-content;white-space:nowrap;">${len}</div></div>`
+        },
+      },
+    },
+    {
+      limit: 5,
+      name: "graffiti",
+      source: bhGraffiti,
+      display: function (data) {
+        return data && data.validator_indices && data.validator_indices.length ? data.validator_indices.join(",") : ""
+      },
+      templates: {
+        header: '<h5 class="font-weight-bold ml-3">Graffiti</h5>',
+        suggestion: function (data) {
+          var len = data.validator_indices.length > 10 ? 10 + "+" : data.validator_indices.length
+          return `<div class="text-monospace high-contrast" style="display:flex"><div class="text-truncate" style="flex:1 1 auto;">${data.graffiti}</div><div style="max-width:fit-content;white-space:nowrap;">${len}</div></div>`
         },
       },
     }
@@ -68,10 +122,21 @@ function create_typeahead(input_container) {
   $(input_container).on("input", function () {
     $(".tt-suggestion").first().addClass("tt-cursor")
   })
-  $(input_container).on("typeahead:select", function (e, sug) {
-    $(input_container).val(sug.index)
-    $(input_container).attr("pk", sug.pubkey)
-  })
+  // $(input_container).on("typeahead:select", function (e, sug) {
+
+  //   // console.log('sug: ', sug.validator_indices, sug.validator_indices.length)
+  //   // $(input_container).val('asdf')
+  //   console.log('typeahead select', e, sug)
+
+  //   if (sug.validator_indices && sug.validator_indices.length) {
+  //     $(input_container).val(sug.validator_indices.join(','))
+  //   }
+  //   // else {
+  //     // $(input_container).val(sug.index)
+  //     // $(input_container).attr("pk", sug.pubkey)
+  //     $("#add-validator-input").val("asdf")
+  //   // }
+  // })
 }
 
 function loadMonitoringData(data) {
@@ -147,6 +212,7 @@ function loadMonitoringData(data) {
       searchPlaceholder: "Search...",
       zeroRecords: "No entries match",
     },
+    stateSave: true,
     processing: true,
     responsive: true,
     scroller: true,
@@ -282,10 +348,7 @@ function loadMonitoringData(data) {
           if (type === "sort" || type === "type") {
             return data
           }
-          if (parseInt(data) === 0) {
-            return "N/A"
-          }
-          return `<span class="heading-l4">${luxon.DateTime.fromMillis(data * 1000).toRelative({ style: "long" }) || "N/A"}</span>`
+          return `<span class="heading-l4">${getRelativeTime(getLuxonDateFromTimestamp(data)) || "N/A"}</span>`
         },
       },
       // {
@@ -314,6 +377,7 @@ function loadNetworkData(data) {
       searchPlaceholder: "Search...",
       zeroRecords: "No entries match",
     },
+    stateSave: true,
     processing: true,
     responsive: false,
     scroller: true,
@@ -388,7 +452,7 @@ function loadNetworkData(data) {
           if (type === "sort" || type === "type") {
             return data
           }
-          return `<span class="heading-l4">${luxon.DateTime.fromMillis(data).toRelative({ style: "long" })}</span>`
+          return `<span class="heading-l4">${getRelativeTime(luxon.DateTime.fromMillis(data))}</span>`
         },
       },
     ],
@@ -407,26 +471,33 @@ function loadValidatorsData(data) {
       search: "",
       searchPlaceholder: "Search...",
       zeroRecords: "No entries match",
+      paginate: {
+        previous: '<i class="fas fa-chevron-left"></i>',
+        next: '<i class="fas fa-chevron-right"></i>',
+      },
     },
+    stateSave: true,
     processing: true,
     // responsive: true,
     paging: true,
-    pagingType: "first_last_numbers",
+    pagingType: "input",
     select: {
       items: "row",
       toggleable: true,
+      // blurable: true,
     },
     fixedHeader: true,
     data: data,
     drawCallback: function (settings) {
       $('[data-toggle="tooltip"]').tooltip()
-    },
-    initComplete: function (settings, json) {
-      $("body").find(".dataTables_scrollBody").addClass("scrollbar")
 
       // click event to validators table edit button
       $("#validators-notifications #edit-validator-events").on("click", function (e) {
-        $("#manageNotificationsModal").attr("rowId", $(this).parent().parent().parent().attr("id"))
+        let row = $(this).parent().parent().parent()
+        $("#ManageNotificationModal").attr("rowId", "")
+        $("#ManageNotificationModal").attr("subscriptions", "")
+        $("#ManageNotificationModal").attr("rowId", row.attr("id"))
+        $("#ManageNotificationModal").attr("subscriptions", row.find("div[subscriptions]").attr("subscriptions"))
       })
 
       // click event to remove button
@@ -438,6 +509,9 @@ function loadValidatorsData(data) {
         $("#confirmRemoveModal").attr("rowId", rowId)
         $("#confirmRemoveModal").attr("tablename", "validators")
       })
+    },
+    initComplete: function (settings, json) {
+      $("body").find(".dataTables_scrollBody").addClass("scrollbar")
     },
     columnDefs: [
       {
@@ -470,10 +544,14 @@ function loadValidatorsData(data) {
             }
             let notifications = ""
             let hasItems = false
+            let events = []
+            row.Notification = row.Notification.sort((a, b) => (a.Notification > b.Notification ? 1 : -1))
+
             for (let i = 0; i < row.Notification.length; i++) {
               let n = row.Notification[i].Notification.split(":")
               n = n[n.length - 1]
               if (VALIDATOR_EVENTS.includes(n)) {
+                events.push(n)
                 hasItems = true
                 let badgeColor = ""
                 let textColor = ""
@@ -493,14 +571,19 @@ function loadValidatorsData(data) {
                   case "validator_synccommittee_soon":
                     badgeColor = "badge-light"
                     break
+                  case "validator_is_offline":
+                    badgeColor = "badge-light"
+                    break
+                  case "validator_withdrawal":
+                    badgeColor = "badge-light"
                 }
                 notifications += `<span style="font-size: 12px; font-weight: 500;" class="badge badge-pill ${badgeColor} ${textColor} badge-custom-size mr-1 my-1">${n.replace("validator", "").replaceAll("_", " ")}</span>`
               }
             }
             if (!hasItems) {
-              return "<span>Not subscribed to any events</span>"
+              return `<div subscriptions=${events}>Not subscribed to any events</div>`
             }
-            return `<div style="white-space: normal;">${notifications}</div>`
+            return `<div subscriptions=${events} style="white-space: normal;">${notifications}</div>`
           }
           return null
         },
@@ -568,7 +651,7 @@ function loadValidatorsData(data) {
                   .replace("validator", "")
                   .replaceAll("_", " ")
               : "N/A"
-          }</span><span class="heading-l4 d-block d-sm-inline-block mt-2 mt-sm-0">${luxon.DateTime.fromMillis(row.Notification[0].Timestamp * 1000).toRelative({ style: "long" }) || "N/A"}</span>`
+          }</span><span class="heading-l4 d-block d-sm-inline-block mt-2 mt-sm-0">${getRelativeTime(luxon.DateTime.fromMillis(row.Notification[0].Timestamp * 1000)) || "N/A"}</span>`
         },
       },
       {
@@ -576,7 +659,7 @@ function loadValidatorsData(data) {
         orderable: false,
         responsivePriority: 3,
         data: null,
-        defaultContent: '<div class="d-flex align-items-center"><i class="fas fa-pen fa-xs text-muted i-custom mx-2" id="edit-validator-events" title="Manage notifications for the selected validator(s)" style="padding: .5rem; cursor: pointer;" data-toggle= "modal" data-target="#manageNotificationsModal"></i><i class="fas fa-times fa-lg mx-2 i-custom" id="remove-btn" title="Remove validator" style="padding: .5rem; color: var(--red); cursor: pointer;" data-toggle= "modal" data-target="#confirmRemoveModal" data-modaltext="Are you sure you want to remove the entry?"></i></div>',
+        defaultContent: '<div class="d-flex align-items-center"><i class="fas fa-pen fa-xs text-muted i-custom mx-2" id="edit-validator-events" title="Manage notifications for the selected validator(s)" style="padding: .5rem; cursor: pointer;" data-toggle= "modal" data-target="#ManageNotificationModal"></i><i class="fas fa-times fa-lg mx-2 i-custom" id="remove-btn" title="Remove validator" style="padding: .5rem; color: var(--red); cursor: pointer;" data-toggle= "modal" data-target="#confirmRemoveModal" data-modaltext="Are you sure you want to remove the entry?"></i></div>',
       },
     ],
     rowId: function (data, type, row, meta) {
@@ -584,28 +667,68 @@ function loadValidatorsData(data) {
     },
   })
 
-  // show manage-notifications button and remove-all button only if there is data in the validator table
-  if (DATA.length !== 0) {
-    $("#manage-notifications-btn").removeAttr("hidden")
-    // $('#remove-all-btn').removeAttr('hidden')
-    $("#view-dashboard").removeAttr("hidden")
-    if ($(window).width() < 620) {
-      $("#add-validator-btn-text").attr("hidden", true)
-      $("#add-validator-btn-icon").removeAttr("hidden")
-    } else {
-      $("#add-validator-btn-text").removeAttr("hidden")
-      $("#add-validator-btn-icon").attr("hidden", true)
-    }
-    $(window).resize(function () {
-      if ($(window).width() < 620) {
-        $("#add-validator-btn-text").attr("hidden", true)
-        $("#add-validator-btn-icon").removeAttr("hidden")
-      } else {
-        $("#add-validator-btn-text").removeAttr("hidden")
-        $("#add-validator-btn-icon").attr("hidden", true)
+  document.addEventListener("click", function (e) {
+    let isWatchlistParent = false
+    let limit = 0
+    let tgt = e.target
+    while (tgt) {
+      if ($("#watchlist-container").is(tgt) || (tgt.classList && tgt.classList.contains("modal")) || (tgt.classList && tgt.classList.contains("page-link"))) {
+        isWatchlistParent = true
+        break
       }
-    })
-  }
+      tgt = tgt.parentNode
+      limit += 1
+      if (limit > 50) {
+        break
+      }
+    }
+    if (!isWatchlistParent) {
+      $("#validators-notifications").DataTable().rows().deselect()
+    }
+  })
+
+  $("#selectAll-notifications-btn").on("click", () => {
+    $("#validators-notifications").DataTable().rows().select()
+  })
+
+  // validatorsTable.on("select.dt", function (e, dt, type, indexes) {
+  //   if (indexes && indexes.length) {
+  //     document.getElementById("remove-selected-btn").removeAttribute("disabled")
+  //     document.getElementById("manage-notifications-btn").removeAttribute("disabled")
+  //     document.getElementById("selectAll-notifications-btn").setAttribute("disabled", true)
+  //   }
+  // })
+
+  // validatorsTable.on("deselect.dt", function (e, dt, type, indexes) {
+  //   if (indexes && indexes.length <= 1) {
+  //     document.getElementById("remove-selected-btn").setAttribute("disabled", true)
+  //     document.getElementById("manage-notifications-btn").setAttribute("disabled", true)
+  //     document.getElementById("selectAll-notifications-btn").removeAttribute("disabled")
+  //   }
+  // })
+
+  // show manage-notifications button and remove-all button only if there is data in the validator table
+  // if (DATA.length !== 0) {
+  //   $("#manage-notifications-btn").removeAttr("hidden")
+  //   // $('#remove-all-btn').removeAttr('hidden')
+  //   $("#view-dashboard").removeAttr("hidden")
+  //   if ($(window).width() < 620) {
+  //     $("#add-validator-btn-text").attr("hidden", true)
+  //     $("#add-validator-btn-icon").removeAttr("hidden")
+  //   } else {
+  //     $("#add-validator-btn-text").removeAttr("hidden")
+  //     $("#add-validator-btn-icon").attr("hidden", true)
+  //   }
+  //   // $(window).resize(function () {
+  //   //   if ($(window).width() < 620) {
+  //   //     $("#add-validator-btn-text").attr("hidden", true)
+  //   //     $("#add-validator-btn-icon").removeAttr("hidden")
+  //   //   } else {
+  //   //     $("#add-validator-btn-text").removeAttr("hidden")
+  //   //     $("#add-validator-btn-icon").attr("hidden", true)
+  //   //   }
+  //   // })
+  // }
 }
 
 // function remove_item_from_event_container(pubkey) {
@@ -617,7 +740,7 @@ function loadValidatorsData(data) {
 //   }
 // }
 
-$(document).ready(function () {
+$(function () {
   if (document.getElementsByName("CsrfField")[0] !== undefined) {
     csrfToken = document.getElementsByName("CsrfField")[0].value
   }
@@ -627,14 +750,10 @@ $(document).ready(function () {
 
   loadValidatorsData(DATA)
   loadMonitoringData(MONITORING)
-  loadNetworkData(NET.Events_ts)
 
-  $(document).on("click", function (e) {
-    // remove selected class from rows on click outside
-    if (!$("#validators-notifications").is(e.target) && $("#validators-notifications").has(e.target).length === 0 && !$("#manage-notifications-btn").is(e.target) && $("#manage-notifications-btn").has(e.target).length === 0) {
-      // $('#validators-notifications .selected').removeClass('selected')
-    }
-  })
+  if (typeof NET !== "undefined" && NET && NET.Events_ts) {
+    loadNetworkData(NET.Events_ts)
+  }
 
   // $('#remove-all-btn').on('click', function (e) {
   //   $('#modaltext').text($(this).data('modaltext'))
@@ -648,7 +767,7 @@ $(document).ready(function () {
     const tablename = $("#confirmRemoveModal").attr("tablename")
 
     // if rowId also check tablename then delete row in corresponding data section
-    // if no row id delete directly in correponding data section
+    // if no row id delete directly in corresponding data section
     if (rowId !== undefined) {
       if (tablename === "monitoring") {
         $(this).html('<div class="spinner-border spinner-border-sm" role="status"><span class="sr-only">Removing...</span></div>')
@@ -733,146 +852,55 @@ $(document).ready(function () {
   })
 
   // on modal open after click event to validators table edit button
-  $("#manageNotificationsModal").on("show.bs.modal", function (e) {
-    // get the selected row (single row selected)
-    let rowData = $("#validators-notifications")
-      .DataTable()
-      .row($("#" + $(this).attr("rowId")))
-      .data()
-    if (rowData && rowData.Index) {
-      $("#selected-validators-events-container").append(
-        `<span style="font-size: 12px; font-weight: 500;" id="validator-event-badge" class="d-inline-block badge badge-pill badge-light badge-custom-size mr-2 mb-2" pk=${rowData.Pubkey}>
-        		Validator ${rowData.Index}
-          	<i class="fas fa-times ml-2" style="cursor: pointer;" title="Remove from selected validators" onclick="remove_item_from_event_container('${rowData.Pubkey}')"></i>
-        </span>`
-      )
-      for (let event of $("#manage_all_events :input")) {
-        for (let item of rowData.Notification) {
-          let n = item.Notification.split(":")
-          n = n[n.length - 1]
-          $(`#manage_${n} input#${$(event).attr("id")}`).prop("checked", true)
+  $("#ManageNotificationModal").on("show.bs.modal", function (e) {
+    $("#ManageNotificationModal-form-content").show()
+    $("#ManageNotificationModal button[type='submit']").prop("disabled", false)
+    $("#ManageNotificationModal")
+      .find('input[type="checkbox"]')
+      .each(function () {
+        $(this).prop("checked", false)
+      })
+
+    let rowID = $(this).attr("rowid")
+    // console.log('row id: ', rowID)
+    if (rowID) {
+      // let inputs = document.querySelectorAll('#ManageNotificationModal input[type="checkbox"]')
+      // let activeCount = 0
+      let subscriptions = $(this).attr("subscriptions")
+      document.getElementById("ManageNotificationModal-validators").value = rowID
+      if (subscriptions) {
+        subscriptions = subscriptions.split(",")
+        for (let i = 0; i < subscriptions.length; i++) {
+          let sub = subscriptions[i]
+          $("#watchlist-selected-" + sub).prop("checked", true)
+          // activeCount += 1
         }
       }
+
+      // if (activeCount == inputs.length - 1) {
+      //   $("#ManageNotificationModal-all").prop("checked", true)
+      // }
     } else {
-      // get the selected rows (mutiple rows selected)
-      const rowsSelected = $("#validators-notifications").DataTable().rows(".selected").data()
-      $("#selected-validators-events-container").prev("span").text("")
-      $("#selected-validators-events-container").html("")
-      $("#selected-validators-events-container ~ div").css("opacity", 1)
+      let rowsSelected = $("#validators-notifications").DataTable().rows(".selected").data()
       if (rowsSelected && rowsSelected.length) {
-        $("#update-subs-button").attr("disabled", false)
-        for (let i = 0; i < rowsSelected.length; i++) {
-          $("#selected-validators-events-container").append(
-            `<span style="font-size: 12px; font-weight: 500;" id="validator-event-badge" class="d-inline-block badge badge-pill badge-light badge-custom-size mr-2 mb-2" pk=${rowsSelected[i].Pubkey}>
-              Validator ${rowsSelected[i].Index}
-              <i class="fas fa-times ml-2" style="cursor: pointer;" onclick="remove_item_from_event_container('${rowsSelected[i].Pubkey}')"></i>
-            </span>`
-          )
+        let valis = rowsSelected.map((row) => row.Pubkey).join(",")
+        document.getElementById("ManageNotificationModal-validators").value = valis
+        if (rowsSelected.length === 1) {
+          document.getElementById("ManageNotificationModal-subtitle").innerHTML = `You've selected one validator from your watchlist`
+        } else {
+          document.getElementById("ManageNotificationModal-subtitle").innerHTML = `You've selected ${rowsSelected.length} validators from your watchlist`
         }
       } else {
-        $("#selected-validators-events-container ~ div").css("opacity", 0.3)
-        $("#selected-validators-events-container").prev("span").text("ℹ️ No validators selected")
-        $("#selected-validators-events-container").html("<span>Select validators from the table. Hold down <kbd>Ctrl</kbd> to select multiple rows.</span>")
-        $("#update-subs-button").attr("disabled", "")
+        document.getElementById("ManageNotificationModal-subtitle").innerHTML = `No validators selected.`
+        $("#ManageNotificationModal-form-content").hide()
+        $("#ManageNotificationModal button[type='submit']").prop("disabled", true)
       }
     }
   })
 
-  // on modal close
-  $("#manageNotificationsModal").on("hide.bs.modal", function (e) {
-    $(this).removeAttr("rowId")
-    $("#selected-validators-events-container #validator-event-badge").remove()
-    for (let event of $("#manage_all_events :input")) {
-      for (let item of VALIDATOR_EVENTS) {
-        $(`#manage_${item} input#${$(event).attr("id")}`).prop("checked", false)
-      }
-      $(event).prop("checked", false)
-    }
-
-    $("[id^=all_events]").attr("checked", false)
-
-    // remove selected class from rows when modal closed
-    // $('#validators-notifications .selected').removeClass('selected')
-  })
-
-  function get_validator_manage_sub_events() {
-    let events = []
-    for (let item of VALIDATOR_EVENTS) {
-      events.push({
-        event: item,
-        email: $(`#manage_${item} :input#email`).prop("checked"),
-        push: $(`#manage_${item} :input#push`).prop("checked"),
-        web: $(`#manage_${item} :input#web`).prop("checked"),
-      })
-    }
-    return events
-  }
-
-  $("#update-subs-button").on("click", function () {
-    $(this).html('<div class="spinner-border spinner-border-sm" role="status"><span class="sr-only">Saving...</span></div>')
-    let pubkeys = []
-    for (let item of $("#selected-validators-events-container").find("span")) {
-      pubkeys.push($(item).attr("pk"))
-    }
-    if (pubkeys.length === 0) {
-      return
-    }
-    let events = get_validator_manage_sub_events()
-    fetch(`/user/notifications-center/updatesubs`, {
-      method: "POST",
-      headers: { "X-CSRF-Token": csrfToken },
-      credentials: "include",
-      body: JSON.stringify({ pubkeys: pubkeys, events: events }),
-    }).then((res) => {
-      if (res.status == 200) {
-        $("#manageNotificationsModal").modal("hide")
-        window.location.reload()
-      } else {
-        alert("Error updating validators subscriptions")
-        $("#manageNotificationsModal").modal("hide")
-        window.location.reload()
-      }
-      $(this).html("Save")
-    })
-  })
-
-  function get_validator_sub_events() {
-    let events = []
-    for (let item of VALIDATOR_EVENTS) {
-      events.push({
-        event: item,
-        email: $(`#${item} :input#email`).prop("checked"),
-        push: $(`#${item} :input#push`).prop("checked"),
-        web: $(`#${item} :input#web`).prop("checked"),
-      })
-    }
-    return events
-  }
-
-  $("#add-validator-button").on("click", function () {
-    try {
-      let index = parseInt($("#add-validator-input").val())
-      let events = get_validator_sub_events()
-      if (!isNaN(index)) {
-        fetch(`/user/notifications-center/validatorsub`, {
-          method: "POST",
-          headers: { "X-CSRF-Token": csrfToken },
-          credentials: "include",
-          body: JSON.stringify({ index, pubkey: $("#add-validator-input").attr("pk"), events: events }),
-        }).then((res) => {
-          if (res.status == 200) {
-            $("#addValidatorModal").modal("hide")
-            window.location.reload()
-          } else {
-            alert("Error adding validators to Watchlist")
-            $("#addValidatorModal").modal("hide")
-            window.location.reload()
-          }
-        })
-      }
-    } catch {
-      alert("Invalid Validator Index")
-    }
+  $("#ManageNotificationModal").on("hide.bs.modal", function (e) {
+    $(this).removeAttr("rowid")
+    $(this).removeAttr("subscriptions")
   })
 
   // select/deselect notification checkboxes for all events
@@ -955,11 +983,11 @@ $(document).ready(function () {
       body: JSON.stringify(events),
     }).then((res) => {
       if (res.status == 200) {
-        $("#manageNotificationsModal").modal("hide")
+        $("#ManageNotificationModal").modal("hide")
         window.location.reload()
       } else {
         alert("Error updating validators subscriptions")
-        $("#manageNotificationsModal").modal("hide")
+        $("#ManageNotificationModal").modal("hide")
         window.location.reload()
       }
     })
@@ -975,11 +1003,11 @@ $(document).ready(function () {
         body: "",
       }).then((res) => {
         if (res.status == 200) {
-          $("#addNetworkEventModal").modal("hide")
+          $("#NetworkEventModal").modal("hide")
           window.location.reload()
         } else {
           alert("Error updating network subscriptions")
-          $("#addNetworkEventModal").modal("hide")
+          $("#NetworkEventModal").modal("hide")
           window.location.reload()
         }
         $(this).html("Save")
@@ -993,15 +1021,33 @@ $(document).ready(function () {
         body: "",
       }).then((res) => {
         if (res.status == 200) {
-          $("#addNetworkEventModal").modal("hide")
+          $("#NetworkEventModal").modal("hide")
           window.location.reload()
         } else {
           alert("Error updating network subscriptions")
-          $("#addNetworkEventModal").modal("hide")
+          $("#NetworkEventModal").modal("hide")
           window.location.reload()
         }
         $(this).html("Save")
       })
     }
   })
+})
+
+// Sets a hidden input with the selected validators
+$("#RemoveSelectedValidatorsModal").on("show.bs.modal", function (event) {
+  $('#RemoveSelectedValidatorsModal button[type="submit"]').prop("disabled", false)
+  let rowsSelected = $("#validators-notifications").DataTable().rows(".selected").data()
+  if (rowsSelected && rowsSelected.length) {
+    let valis = rowsSelected.map((row) => row.Pubkey).join(",")
+    document.getElementById("RemoveSelectedValidatorsModal-input").value = valis
+    if (rowsSelected.length === 1) {
+      document.getElementById("RemoveSelectedValidatorsModal-modaltext").innerHTML = `You've selected one validator to remove from your watchlist`
+    } else {
+      document.getElementById("RemoveSelectedValidatorsModal-modaltext").innerHTML = `You've selected ${rowsSelected.length} validators to remove from your watchlist`
+    }
+  } else {
+    document.getElementById("RemoveSelectedValidatorsModal-modaltext").innerHTML = `No validators selected.`
+    $('#RemoveSelectedValidatorsModal button[type="submit"]').prop("disabled", true)
+  }
 })

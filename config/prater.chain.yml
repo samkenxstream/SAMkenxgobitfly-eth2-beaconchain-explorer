@@ -4,6 +4,14 @@
 PRESET_BASE: 'mainnet'
 CONFIG_NAME: 'prater'
 
+# Transition
+# ---------------------------------------------------------------
+# Expected August 10, 2022
+TERMINAL_TOTAL_DIFFICULTY: 10790000
+# By default, don't use these params
+TERMINAL_BLOCK_HASH: 0x0000000000000000000000000000000000000000000000000000000000000000
+TERMINAL_BLOCK_HASH_ACTIVATION_EPOCH: 18446744073709551615
+
 # Genesis
 # ---------------------------------------------------------------
 # `2**14` (= 16,384)
@@ -25,12 +33,15 @@ GENESIS_DELAY: 1919188
 # Altair
 ALTAIR_FORK_VERSION: 0x01001020
 ALTAIR_FORK_EPOCH: 36660
-# BELLATRIX
+# Bellatrix
 BELLATRIX_FORK_VERSION: 0x02001020
-BELLATRIX_FORK_EPOCH: 18446744073709551615
+BELLATRIX_FORK_EPOCH: 112260
+# Capella
+CAPELLA_FORK_VERSION: 0x03001020
+CAPELLA_FORK_EPOCH: 162304
 # Sharding
-SHARDING_FORK_VERSION: 0x03001020
-SHARDING_FORK_EPOCH: 18446744073709551615
+DENEB_FORK_VERSION: 0x04001020
+DENEB_FORK_EPOCH: 18446744073709551615
 
 # Time parameters
 # ---------------------------------------------------------------
@@ -277,3 +288,19 @@ TARGET_SAMPLES_PER_BLOCK: 1024
 MAX_SAMPLE_PRICE: 8589934592
 # 2**3 (= 8) Gwei
 MIN_SAMPLE_PRICE: 8
+
+# Max operations per block
+# ---------------------------------------------------------------
+# 2**4 (= 16)
+MAX_BLS_TO_EXECUTION_CHANGES: 16
+
+
+# Execution
+# ---------------------------------------------------------------
+# [customized] 2**2 (= 4)
+MAX_WITHDRAWALS_PER_PAYLOAD: 16
+
+# Withdrawals processing
+# ---------------------------------------------------------------
+# [customized] 2**4 (= 16) validators
+MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP: 16384

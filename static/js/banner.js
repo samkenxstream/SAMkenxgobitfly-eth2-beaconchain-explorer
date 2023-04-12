@@ -36,60 +36,58 @@ function updateBanner() {
       // always visible
       var epochHandle = document.getElementById("banner-epoch-data")
 
-      if (data.currentEpoch) epochHandle.textContent = addCommas(data.currentEpoch)
+      if (data.currentEpoch) epochHandle.innerHTML = addCommas(data.currentEpoch)
 
       var ethPriceHandle = document.getElementById("banner-eth-price-data")
 
       let userCurrency = getCookie("currency")
 
-      if (userCurrency) {
-        switch (userCurrency) {
-          case "AUD":
-            if (data.audRoundPrice && data.audTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>A$ </span>" + "<span class='k-formatted-price'>" + data.audTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.audRoundPrice) + "</span>")
-            }
-            break
-          case "CAD":
-            if (data.cadRoundPrice && data.cadTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>C$ </span>" + "<span class='k-formatted-price'>" + data.cadTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.cadRoundPrice) + "</span>")
-            }
-            break
-          case "CNY":
-            if (data.cnyRoundPrice && data.cnyTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>¥ </span>" + "<span class='k-formatted-price'>" + data.cnyTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.cnyRoundPrice) + "</span>")
-            }
-            break
-          case "EUR":
-            if (data.eurRoundPrice && data.eurTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>€ </span>" + "<span class='k-formatted-price'>" + data.eurTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.eurRoundPrice) + "</span>")
-            }
-            break
-          case "GBP":
-            if (data.gbpRoundPrice && data.gbpTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>£ </span>" + "<span class='k-formatted-price'>" + data.gbpTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.gbpRoundPrice) + "</span>")
-            }
-            break
-          case "JPY":
-            if (data.jpyRoundPrice && data.jpyTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>¥ </span>" + "<span class='k-formatted-price'>" + data.jpyTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.jpyRoundPrice) + "</span>")
-            }
-            break
-          case "RUB":
-            if (data.rubRoundPrice && data.rubTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>₽ </span>" + "<span class='k-formatted-price'>" + data.rubTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.rubRoundPrice) + "</span>")
-            }
-            break
-          default:
-            if (data.usdRoundPrice && data.usdTruncPrice) {
-              return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>$ </span>" + "<span class='k-formatted-price'>" + data.usdTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.usdRoundPrice) + "</span>")
-            }
-        }
+      switch (userCurrency) {
+        case "AUD":
+          if (data.audRoundPrice && data.audTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>A$ </span>" + "<span class='k-formatted-price'>" + data.audTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.audRoundPrice) + "</span>")
+          }
+          break
+        case "CAD":
+          if (data.cadRoundPrice && data.cadTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>C$ </span>" + "<span class='k-formatted-price'>" + data.cadTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.cadRoundPrice) + "</span>")
+          }
+          break
+        case "CNY":
+          if (data.cnyRoundPrice && data.cnyTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>¥ </span>" + "<span class='k-formatted-price'>" + data.cnyTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.cnyRoundPrice) + "</span>")
+          }
+          break
+        case "EUR":
+          if (data.eurRoundPrice && data.eurTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>€ </span>" + "<span class='k-formatted-price'>" + data.eurTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.eurRoundPrice) + "</span>")
+          }
+          break
+        case "GBP":
+          if (data.gbpRoundPrice && data.gbpTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>£ </span>" + "<span class='k-formatted-price'>" + data.gbpTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.gbpRoundPrice) + "</span>")
+          }
+          break
+        case "JPY":
+          if (data.jpyRoundPrice && data.jpyTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>¥ </span>" + "<span class='k-formatted-price'>" + data.jpyTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.jpyRoundPrice) + "</span>")
+          }
+          break
+        case "RUB":
+          if (data.rubRoundPrice && data.rubTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>₽ </span>" + "<span class='k-formatted-price'>" + data.rubTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.rubRoundPrice) + "</span>")
+          }
+          break
+        default:
+          if (data.usdRoundPrice && data.usdTruncPrice) {
+            return (ethPriceHandle.innerHTML = "<span class='currency-symbol'>$ </span>" + "<span class='k-formatted-price'>" + data.usdTruncPrice + "</span>" + "<span class='price'>" + addCommas(data.usdRoundPrice) + "</span>")
+          }
       }
 
       // always visible
       var slotHandle = document.getElementById("banner-slot-data")
 
-      if (data.currentSlot) slotHandle.textContent = addCommas(data.currentSlot)
+      if (data.currentSlot) slotHandle.innerHTML = addCommas(data.currentSlot)
 
       var finDelayDataHandle = document.getElementById("banner-fin-data")
       finDelayHtml = `
@@ -139,19 +137,20 @@ function updateBanner() {
         var bannerHandle = document.getElementById("banner-status")
         if (!bannerHandle) {
           var statusHtml = `
-            <div id="banner-status" class="info-item d-flex mr-3">
-              <div class="info-item-body">
-                <i class="fas fa-sync" data-toggle="tooltip" title="" data-original-title="The explorer is currently syncing with the network"></i>
-              </div>
-            </div>
+          <a data-toggle="tooltip" title="The explorer is currently syncing with the network" id="banner-status" style="white-space: nowrap;" class="mr-2" href="/"><i class="fas fa-sync"></i> <span>|</span></a>
             `
-          document.getElementById("banner-stats").insertAdjacentHTML("beforeend", statusHtml)
+          document.getElementById("banner-home").remove()
+          document.getElementById("banner-stats").insertAdjacentHTML("afterbegin", statusHtml)
         }
       } else {
         // delete sync if it exists otherwise do nothing
         var statusHandle = document.getElementById("banner-status")
         if (statusHandle) {
+          var homeHtml = `
+          <a id="banner-home" style="white-space: nowrap;" class="mr-2" href="/"><i class="fas fa-home"></i> <span>|</span></a>
+          `
           statusHandle.remove()
+          document.getElementById("banner-stats").insertAdjacentHTML("afterbegin", homeHtml)
         }
       }
     })

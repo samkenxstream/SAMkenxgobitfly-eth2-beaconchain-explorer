@@ -58,6 +58,20 @@ function showValidatorHist(index) {
         next: '<i class="fas fa-chevron-right"></i>',
       },
     },
+    columnDefs: [
+      {
+        targets: 1,
+        createdCell: function (td, cellData, rowData, row, col) {
+          $(td).css("width", "0px")
+        },
+      },
+      {
+        targets: 2,
+        createdCell: function (td, cellData, rowData, row, col) {
+          $(td).css("padding", "0px")
+        },
+      },
+    ],
     drawCallback: function (settings) {
       formatTimestamps()
     },
@@ -188,15 +202,12 @@ function addValidatorUpdateUI() {
     method: "GET",
   }).then((res) => {
     res.json().then((data) => {
-      let eff = 0.0
-      for (let incDistance of data) {
-        if (incDistance === 0.0) {
-          continue
-        }
-        eff += (1.0 / incDistance) * 100.0
+      let sum = 0.0
+      for (let eff of data) {
+        sum += eff
       }
-      eff = eff / data.length
-      setValidatorEffectiveness("validator-eff-total", eff)
+      sum = sum / data.length
+      setValidatorEffectiveness("validator-eff-total", sum)
     })
   })
   showProposedHistoryTable()
@@ -278,7 +289,7 @@ function renderProposedHistoryTable(data) {
         targets: 1,
         data: "1",
         render: function (data, type, row, meta) {
-          return "<span>" + luxon.DateTime.fromMillis(data * 1000).toRelative({ style: "long" }) + "</span>"
+          return "<span>" + getRelativeTime(luxon.DateTime.fromMillis(data * 1000)) + "</span>"
         },
       },
       {
@@ -321,6 +332,9 @@ function switchFrom(el1, el2, el3, el4) {
 var firstSwitch = true
 
 $(document).ready(function () {
+  $("button").on("mousedown", (evt) => {
+    evt.preventDefault() // prevent setting the browser focus on all mouse buttons, which prevents tooltips from disapearing
+  })
   $("#rewards-button").on("click", () => {
     localStorage.setItem("load_dashboard_validators", true)
     window.location.href = "/rewards"
@@ -486,7 +500,7 @@ $(document).ready(function () {
         render: function (data, type, row, meta) {
           if (type == "sort" || type == "type") return data ? data[0] : null
           if (data === null) return "-"
-          return `<span data-toggle="tooltip" data-placement="top" title="${luxon.DateTime.fromMillis(data[1] * 1000).toRelative({ style: "short" })}">${luxon.DateTime.fromMillis(data[1] * 1000).toRelative({ style: "short" })} (<a href="/epoch/${data[0]}">Epoch ${data[0]}</a>)</span>`
+          return `<span data-toggle="tooltip" data-placement="top" title="${getRelativeTime(luxon.DateTime.fromMillis(data[1] * 1000))}">${getRelativeTime(luxon.DateTime.fromMillis(data[1] * 1000))} (<a href="/epoch/${data[0]}">Epoch ${data[0]}</a>)</span>`
         },
       },
       {
@@ -496,7 +510,7 @@ $(document).ready(function () {
         render: function (data, type, row, meta) {
           if (type == "sort" || type == "type") return data ? data[0] : null
           if (data === null) return "-"
-          return `<span data-toggle="tooltip" data-placement="top" title="${luxon.DateTime.fromMillis(data[1] * 1000).toRelative({ style: "short" })}">${luxon.DateTime.fromMillis(data[1] * 1000).toRelative({ style: "short" })} (<a href="/epoch/${data[0]}">Epoch ${data[0]}</a>)</span>`
+          return `<span data-toggle="tooltip" data-placement="top" title="${getRelativeTime(luxon.DateTime.fromMillis(data[1] * 1000))}">${getRelativeTime(luxon.DateTime.fromMillis(data[1] * 1000))} (<a href="/epoch/${data[0]}">Epoch ${data[0]}</a>)</span>`
         },
       },
       {
@@ -505,7 +519,7 @@ $(document).ready(function () {
         render: function (data, type, row, meta) {
           if (type == "sort" || type == "type") return data ? data[0] : null
           if (data === null) return "-"
-          return `<span data-toggle="tooltip" data-placement="top" title="${luxon.DateTime.fromMillis(data[1] * 1000).toRelative({ style: "short" })}">${luxon.DateTime.fromMillis(data[1] * 1000).toRelative({ style: "short" })} (<a href="/epoch/${data[0]}">Epoch ${data[0]}</a>)</span>`
+          return `<span data-toggle="tooltip" data-placement="top" title="${getRelativeTime(luxon.DateTime.fromMillis(data[1] * 1000))}">${getRelativeTime(luxon.DateTime.fromMillis(data[1] * 1000))} (<a href="/epoch/${data[0]}">Epoch ${data[0]}</a>)</span>`
         },
       },
       {
@@ -514,7 +528,7 @@ $(document).ready(function () {
         render: function (data, type, row, meta) {
           if (type == "sort" || type == "type") return data ? data[0] : null
           if (data === null) return "No Attestation found"
-          return `<span>${luxon.DateTime.fromMillis(data[1] * 1000).toRelative({ style: "short" })}</span>`
+          return `<span>${getRelativeTime(luxon.DateTime.fromMillis(data[1] * 1000))}</span>`
         },
       },
       {
@@ -598,7 +612,7 @@ $(document).ready(function () {
       source: bhEth1Addresses,
       display: "address",
       templates: {
-        header: "<h3>Validators by ETH1 Addresses</h3>",
+        header: "<h3>Validators by ETH Addresses</h3>",
         suggestion: function (data) {
           var len = data.validator_indices.length > VALLIMIT ? VALLIMIT + "+" : data.validator_indices.length
           return `<div class="text-monospace high-contrast" style="display:flex"><div class="text-truncate" style="flex:1 1 auto;">${data.eth1_address}</div><div style="max-width:fit-content;white-space:nowrap;">${len}</div></div>`
@@ -734,7 +748,11 @@ $(document).ready(function () {
 
   function renderDashboardInfo() {
     var el = document.getElementById("dashboard-info")
-    el.innerText = `Found ${state.validatorsCount.pending} pending, ${state.validatorsCount.active_online + state.validatorsCount.active_offline} active and ${state.validatorsCount.exited} exited validators`
+    var slashedText = ""
+    if (state.validatorsCount.slashed > 0) {
+      slashedText = `, ${state.validatorsCount.slashed} slashed`
+    }
+    el.innerText = `${state.validatorsCount.active_online + state.validatorsCount.active_offline} active (${state.validatorsCount.active_online} online, ${state.validatorsCount.active_offline} offline), ${state.validatorsCount.pending} pending, ${state.validatorsCount.exited + state.validatorsCount.slashed} exited validators (${state.validatorsCount.exited} voluntary${slashedText})`
 
     if (state.validators.length > 0) {
       showSelectedValidator()
@@ -791,7 +809,7 @@ $(document).ready(function () {
     if (state.validators.length > VALLIMIT) {
       state.validators = state.validators.slice(0, VALLIMIT)
       console.log(`${VALLIMIT} validators limit reached`)
-      alert(`You can not add more than ${VALLIMIT} validators to your dashboard`)
+      handleLimitHit()
     }
   }
 
@@ -815,11 +833,22 @@ $(document).ready(function () {
 
     if (limitReached) {
       console.log(`${VALLIMIT} validators limit reached`)
-      alert(`You can not add more than ${VALLIMIT} validators to your dashboard`)
+      handleLimitHit()
     }
     state.validators.sort(sortValidators)
     renderSelectedValidators()
     updateState()
+  }
+
+  function handleLimitHit() {
+    if (VALLIMIT == 300) {
+      // user is already at the top tier, no need to advertise it to them
+      alert(`Sorry, too many validators! You can not currently add more than ${VALLIMIT} validators to your dashboard.`)
+    } else {
+      if (window.confirm(`With your current premium level, you can not add more than ${VALLIMIT} validators to your dashboard.\n\nBy upgrading to the Whale Tier, this limit gets raised to 280 validators!`)) {
+        window.location.href = "/premium"
+      }
+    }
   }
 
   function addValidator(index) {
@@ -828,7 +857,7 @@ $(document).ready(function () {
       overview.classList.remove("d-none")
     }
     if (state.validators.length >= VALLIMIT) {
-      alert(`Too many validators, you can not add more than ${VALLIMIT} validators to your dashboard!`)
+      handleLimitHit()
       return
     }
     index = index + "" // make sure index is string
@@ -902,6 +931,8 @@ $(document).ready(function () {
       return
     }
     localStorage.setItem("dashboard_validators", JSON.stringify(state.validators))
+    window.dispatchEvent(new CustomEvent("dashboard_validators_set"))
+
     if (state.validators.length) {
       // console.log('length', state.validators)
       var qryStr = "?validators=" + state.validators.join(",")
@@ -927,16 +958,14 @@ $(document).ready(function () {
           console.log(`loaded earnings: fetch: ${t1 - t0}ms`)
           if (!result) return
 
-          // addChange("#earnings-day", result.lastDay)
-          // addChange("#earnings-week", result.lastWeek)
-          // addChange("#earnings-month", result.lastMonth)
-
           document.querySelector("#earnings-day").innerHTML = result.lastDayFormatted || "0.000"
           document.querySelector("#earnings-week").innerHTML = result.lastWeekFormatted || "0.000"
           document.querySelector("#earnings-month").innerHTML = result.lastMonthFormatted || "0.000"
-          document.querySelector("#earnings-total").innerHTML = (result.totalChangeFormatted || "0.000") + ` <span class="d-block" id="earnings-total-change">${result.totalFormatted}</span>`
-          $("#earnings-total span:first").removeClass("text-success").removeClass("text-danger")
-          $("#earnings-total span:first").html($("#earnings-total span:first").html().replace("+", ""))
+          document.querySelector("#earnings-total").innerHTML = result.totalFormatted || "0.000"
+          $("#earnings-total").find('[data-toggle="tooltip"]').tooltip()
+          document.querySelector("#balance-total").innerHTML = result.totalBalance || "0.000"
+          $("#balance-total span:first").removeClass("text-success").removeClass("text-danger")
+          $("#balance-total span:first").html($("#balance-total span:first").html().replace("+", ""))
           // addChange("#earnings-total-change", result.total)
         },
       })
@@ -1031,7 +1060,7 @@ $(document).ready(function () {
     if (state.validators && state.validators.length) {
       var qryStr = "?validators=" + state.validators.join(",")
       $.ajax({
-        url: "/dashboard/data/balance" + qryStr,
+        url: "/dashboard/data/allbalances" + qryStr,
         success: function (result) {
           var t1 = Date.now()
           // let prevDayIncome = 0
@@ -1054,7 +1083,7 @@ $(document).ready(function () {
           // }
 
           var t2 = Date.now()
-          createBalanceChart(result)
+          createBalanceChart(result.consensusChartData, result.executionChartData)
           var t3 = Date.now()
           console.log(`loaded balance-data: length: ${result.length}, fetch: ${t1 - t0}ms, aggregate: ${t2 - t1}ms, render: ${t3 - t2}ms`)
         },
@@ -1075,7 +1104,8 @@ $(document).ready(function () {
   }
 })
 
-function createBalanceChart(income) {
+function createBalanceChart(income, executionIncomeHistory) {
+  executionIncomeHistory = executionIncomeHistory || []
   // console.log("u", utilization)
   Highcharts.stockChart("balance-chart", {
     exporting: {
@@ -1087,12 +1117,33 @@ function createBalanceChart(income) {
     chart: {
       type: "column",
       height: "500px",
+      pointInterval: 24 * 3600 * 1000,
     },
     legend: {
       enabled: true,
     },
     title: {
       text: "Daily Income for all Validators",
+    },
+    navigator: {
+      series: {
+        data: income,
+        color: "#7cb5ec",
+      },
+    },
+    plotOptions: {
+      column: {
+        stacking: "stacked",
+        dataLabels: {
+          enabled: false,
+        },
+        pointInterval: 24 * 3600 * 1000,
+        // pointIntervalUnit: 'day',
+        dataGrouping: {
+          forced: true,
+          units: [["day", [1]]],
+        },
+      },
     },
     xAxis: {
       type: "datetime",
@@ -1139,8 +1190,14 @@ function createBalanceChart(income) {
     ],
     series: [
       {
-        name: "Daily Income",
+        name: "Daily Consensus Income",
         data: income,
+        index: 2,
+      },
+      {
+        name: "Daily Execution Income",
+        data: executionIncomeHistory,
+        index: 1,
       },
     ],
   })
@@ -1200,7 +1257,7 @@ function createProposedChart(data) {
         data: missed,
       },
       {
-        name: "Orphaned",
+        name: "Missed (Orphaned)",
         color: "#e4a354",
         data: orphaned,
       },

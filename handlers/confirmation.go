@@ -1,15 +1,16 @@
 package handlers
 
 import (
+	"eth2-exporter/templates"
 	"eth2-exporter/utils"
-	"html/template"
 	"net/http"
 )
 
-var confirmationTemplate = template.Must(template.New("confirmation").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/confirmation.html"))
-
-// Blocks will return information about blocks using a go template
+// Will return the confirmation page
 func Confirmation(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "confirmation.html")
+	var confirmationTemplate = templates.GetTemplate(templateFiles...)
+
 	w.Header().Set("Content-Type", "text/html")
 
 	type confirmationPageData struct {
@@ -34,14 +35,11 @@ func Confirmation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := InitPageData(w, r, "confirmation", "/blocks", "Blocks")
+	data := InitPageData(w, r, "confirmation", "/blocks", "Blocks", templateFiles)
 	data.Data = pageData
 	data.Meta.NoTrack = true
 
-	err := confirmationTemplate.ExecuteTemplate(w, "layout", data)
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
-		return
+	if handleTemplateError(w, r, "confirmation.go", "Confirmation", "", confirmationTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }

@@ -5,12 +5,17 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"html/template"
+	"math/big"
 	"strings"
 	"time"
 
 	"firebase.google.com/go/messaging"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/lib/pq"
 	"github.com/pkg/errors"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type EventName string
@@ -22,7 +27,8 @@ const (
 	ValidatorMissedAttestationEventName              EventName = "validator_attestation_missed"
 	ValidatorGotSlashedEventName                     EventName = "validator_got_slashed"
 	ValidatorDidSlashEventName                       EventName = "validator_did_slash"
-	ValidatorStateChangedEventName                   EventName = "validator_state_changed"
+	ValidatorIsOfflineEventName                      EventName = "validator_is_offline"
+	ValidatorReceivedWithdrawalEventName             EventName = "validator_withdrawal"
 	ValidatorReceivedDepositEventName                EventName = "validator_received_deposit"
 	NetworkSlashingEventName                         EventName = "network_slashing"
 	NetworkValidatorActivationQueueFullEventName     EventName = "network_validator_activation_queue_full"
@@ -64,8 +70,9 @@ var EventLabel map[EventName]string = map[EventName]string{
 	ValidatorMissedAttestationEventName:              "Your validator(s) missed an attestation",
 	ValidatorGotSlashedEventName:                     "Your validator(s) got slashed",
 	ValidatorDidSlashEventName:                       "Your validator(s) slashed another validator",
-	ValidatorStateChangedEventName:                   "Your validator(s) state changed",
+	ValidatorIsOfflineEventName:                      "Your validator(s) state changed",
 	ValidatorReceivedDepositEventName:                "Your validator(s) received a deposit",
+	ValidatorReceivedWithdrawalEventName:             "A withdrawal was initiated for your validators",
 	NetworkSlashingEventName:                         "A slashing event has been registered by the network",
 	NetworkValidatorActivationQueueFullEventName:     "The activation queue is full",
 	NetworkValidatorActivationQueueNotFullEventName:  "The activation queue is empty",
@@ -103,8 +110,9 @@ var EventNames = []EventName{
 	ValidatorMissedAttestationEventName,
 	ValidatorGotSlashedEventName,
 	ValidatorDidSlashEventName,
-	ValidatorStateChangedEventName,
+	ValidatorIsOfflineEventName,
 	ValidatorReceivedDepositEventName,
+	ValidatorReceivedWithdrawalEventName,
 	NetworkSlashingEventName,
 	NetworkValidatorActivationQueueFullEventName,
 	NetworkValidatorActivationQueueNotFullEventName,
@@ -126,8 +134,71 @@ var EventNames = []EventName{
 	SyncCommitteeSoon,
 }
 
+type EventNameDesc struct {
+	Desc    string
+	Event   EventName
+	Info    template.HTML
+	Warning template.HTML
+}
+
+type MachineMetricSystemUser struct {
+	UserID                    uint64
+	Machine                   string
+	CurrentData               *MachineMetricSystem
+	CurrentDataInsertTs       int64
+	FiveMinuteOldData         *MachineMetricSystem
+	FiveMinuteOldDataInsertTs int64
+}
+
+// this is the source of truth for the validator events that are supported by the user/notification page
+var AddWatchlistEvents = []EventNameDesc{
+	{
+		Desc:  "Validator is Offline",
+		Event: ValidatorIsOfflineEventName,
+		Info:  template.HTML(`<i data-toggle="tooltip" data-html="true" title="<div class='text-left'>Will trigger a notifcation:<br><ul><li>Once you have been offline for 3 epochs</li><li>Every 32 Epochs (~3 hours) during your downtime</li><li>Once you are back online again</li></ul></div>" class="fas fa-question-circle"></i>`),
+	},
+	{
+		Desc:  "Proposals missed",
+		Event: ValidatorMissedProposalEventName,
+	},
+	{
+		Desc:  "Proposals submitted",
+		Event: ValidatorExecutedProposalEventName,
+	},
+	{
+		Desc:  "Validator got slashed",
+		Event: ValidatorGotSlashedEventName,
+	},
+	{
+		Desc:  "Sync committee",
+		Event: SyncCommitteeSoon,
+	},
+	{
+		Desc:    "Attestations missed",
+		Event:   ValidatorMissedAttestationEventName,
+		Warning: template.HTML(`<i data-toggle="tooltip" title="Will trigger every epoch (6.4 minutes) during downtime" class="fas fa-exclamation-circle text-warning"></i>`),
+	},
+	{
+		Desc:  "Withdrawal processed",
+		Event: ValidatorReceivedWithdrawalEventName,
+		Info:  template.HTML(`<i data-toggle="tooltip" data-html="true" title="<div class='text-left'>Will trigger a notifcation when:<br><ul><li>A partial withdrawal is processed</li><li>Your validator exits and its full balance is withdrawn</li></ul> <div>Requires that your validator has 0x01 credentials</div></div>" class="fas fa-question-circle"></i>`),
+	},
+}
+
+// this is the source of truth for the network events that are supported by the user/notification page
+var NetworkNotificationEvents = []EventNameDesc{
+	{
+		Desc:  "Network Notifications",
+		Event: NetworkLivenessIncreasedEventName,
+	},
+	// {
+	// 	Desc:  "Slashing Notifications",
+	// 	Event: NetworkSlashingEventName,
+	// },
+}
+
 func GetDisplayableEventName(event EventName) string {
-	return strings.Title(strings.ReplaceAll(string(event), "_", " "))
+	return cases.Title(language.English).String(strings.ReplaceAll(string(event), "_", " "))
 }
 
 func EventNameFromString(event string) (EventName, error) {
@@ -146,6 +217,7 @@ const (
 )
 
 type Notification interface {
+	GetLatestState() string
 	GetSubscriptionID() uint64
 	GetEventName() EventName
 	GetEpoch() uint64
@@ -171,6 +243,7 @@ type Subscription struct {
 	CreatedEpoch    uint64         `db:"created_epoch"`
 	EventThreshold  float64        `db:"event_threshold"`
 	UnsubscribeHash sql.NullString `db:"unsubscribe_hash" swaggertype:"string"`
+	State           sql.NullString `db:"internal_state" swaggertype:"string"`
 }
 
 type TaggedValidators struct {
@@ -382,10 +455,10 @@ type UserWebhookSubscriptions struct {
 
 type NotificationChannel string
 
-var NotificationChannelLabels map[NotificationChannel]string = map[NotificationChannel]string{
+var NotificationChannelLabels map[NotificationChannel]template.HTML = map[NotificationChannel]template.HTML{
 	EmailNotificationChannel:          "Email Notification",
 	PushNotificationChannel:           "Push Notification",
-	WebhookNotificationChannel:        "Webhook Notification",
+	WebhookNotificationChannel:        `Webhook Notification (<a href="/user/webhooks">configure</a>)`,
 	WebhookDiscordNotificationChannel: "Discord Notification",
 }
 
@@ -428,4 +501,56 @@ func (e *ErrorResponse) Scan(value interface{}) error {
 
 func (a ErrorResponse) Value() (driver.Value, error) {
 	return json.Marshal(a)
+}
+
+type GasNowPageData struct {
+	Code int `json:"code"`
+	Data struct {
+		Rapid     *big.Int `json:"rapid"`
+		Fast      *big.Int `json:"fast"`
+		Standard  *big.Int `json:"standard"`
+		Slow      *big.Int `json:"slow"`
+		Timestamp int64    `json:"timestamp"`
+		Price     float64  `json:"price,omitempty"`
+		PriceUSD  float64  `json:"priceUSD"`
+		Currency  string   `json:"currency,omitempty"`
+	} `json:"data"`
+}
+
+type Eth1AddressSearchItem struct {
+	Address string `json:"address"`
+	Name    string `json:"name"`
+	Token   string `json:"token"`
+}
+
+type RawMempoolResponse struct {
+	Pending map[string]map[int]*RawMempoolTransaction `json:"pending"`
+	Queued  map[string]map[int]*RawMempoolTransaction `json:"queued"`
+	BaseFee map[string]map[int]*RawMempoolTransaction `json:"baseFee"`
+
+	TxsByHash map[common.Hash]*RawMempoolTransaction
+}
+
+func (mempool RawMempoolResponse) FindTxByHash(txHashString string) *RawMempoolTransaction {
+	return mempool.TxsByHash[common.HexToHash(txHashString)]
+}
+
+type RawMempoolTransaction struct {
+	Hash             common.Hash     `json:"hash"`
+	From             *common.Address `json:"from"`
+	To               *common.Address `json:"to"`
+	Value            *hexutil.Big    `json:"value"`
+	Gas              *hexutil.Big    `json:"gas"`
+	GasFeeCap        *hexutil.Big    `json:"maxFeePerGas,omitempty"`
+	GasTipCap        *hexutil.Big    `json:"maxPriorityFeePerGas,omitempty"`
+	GasPrice         *hexutil.Big    `json:"gasPrice"`
+	Nonce            *hexutil.Big    `json:"nonce"`
+	Input            *string         `json:"input"`
+	TransactionIndex *hexutil.Big    `json:"transactionIndex"`
+}
+
+type MempoolTxPageData struct {
+	RawMempoolTransaction
+	TargetIsContract   bool
+	IsContractCreation bool
 }

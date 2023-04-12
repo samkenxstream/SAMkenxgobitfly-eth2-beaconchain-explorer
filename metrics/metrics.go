@@ -2,8 +2,10 @@ package metrics
 
 import (
 	"database/sql"
+	"eth2-exporter/utils"
 	"eth2-exporter/version"
 	"net/http"
+	"net/http/pprof"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,6 +36,10 @@ var (
 		Name: "http_requests_duration",
 		Help: "Duration of HTTP requests in seconds by path and method.",
 	}, []string{"path", "method"})
+	Tasks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "task_counter",
+		Help: "Counter of tasks with name in labels",
+	}, []string{"name"})
 	TaskDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "task_duration",
 		Help:    "Duration of tasks",
@@ -41,7 +47,7 @@ var (
 	}, []string{"task"})
 	DBSLongRunningQueries = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "db_long_running_queries",
-		Help: "Counter of long-running-queries with datbase and query in labels",
+		Help: "Counter of long-running-queries with database and query in labels",
 	}, []string{"database", "query"})
 	Errors = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "errors",
@@ -146,6 +152,18 @@ func Serve(addr string) error {
 </body>
 </html>`))
 	}))
+
+	if utils.Config.Metrics.Pprof {
+		logrus.WithFields(logrus.Fields{"addr": addr}).Infof("serving pprof")
+		router.HandleFunc("/debug/pprof/", pprof.Index)
+		router.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		router.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		router.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		router.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+		router.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+		router.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	}
+
 	srv := &http.Server{
 		ReadTimeout:  time.Second * 10,
 		WriteTimeout: time.Second * 10,

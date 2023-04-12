@@ -3,22 +3,22 @@ package handlers
 import (
 	"eth2-exporter/db"
 	ethclients "eth2-exporter/ethClients"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
-	"eth2-exporter/utils"
-	"html/template"
 	"net/http"
 
 	"github.com/gorilla/csrf"
 )
 
-var ethClientsServicesTemplate = template.Must(template.New("ethClientsServices").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/ethClientsServices.html"))
-
 func EthClientsServices(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "ethClientsServices.html")
+	var ethClientsServicesTemplate = templates.GetTemplate(templateFiles...)
+
 	var err error
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "services", "/ethClientsServices", "Ethereum Clients Services Overview")
+	data := InitPageData(w, r, "services", "/ethClientsServices", "Ethereum Clients Services Overview", templateFiles)
 
 	pageData := ethclients.GetEthClientData()
 	pageData.CsrfField = csrf.TemplateField(r)
@@ -38,8 +38,6 @@ func EthClientsServices(w http.ResponseWriter, r *http.Request) {
 			switch item {
 			case "geth":
 				pageData.Geth.IsUserSubscribed = true
-			case "openethereum":
-				pageData.OpenEthereum.IsUserSubscribed = true
 			case "nethermind":
 				pageData.Nethermind.IsUserSubscribed = true
 			case "besu":
@@ -56,6 +54,10 @@ func EthClientsServices(w http.ResponseWriter, r *http.Request) {
 				pageData.Erigon.IsUserSubscribed = true
 			case "rocketpool":
 				pageData.RocketpoolSmartnode.IsUserSubscribed = true
+			case "mev-boost":
+				pageData.MevBoost.IsUserSubscribed = true
+			case "lodestar":
+				pageData.Lodestar.IsUserSubscribed = true
 			default:
 				continue
 			}
@@ -64,11 +66,7 @@ func EthClientsServices(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data.Data = pageData
-
-	err = ethClientsServicesTemplate.ExecuteTemplate(w, "layout", data)
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
-		return
+	if handleTemplateError(w, r, "ethClientsServices.go", "EthClientsServices", "", ethClientsServicesTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }

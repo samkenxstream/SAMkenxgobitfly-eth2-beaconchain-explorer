@@ -3,34 +3,26 @@ package handlers
 import (
 	"encoding/json"
 	"eth2-exporter/db"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
-	"html/template"
 	"net/http"
 	"strconv"
 	"time"
 )
 
-var visTemplate = template.Must(template.New("vis").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/vis.html"))
-var visVotesTemplate = template.Must(template.New("vis").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/vis_votes.html"))
-
 // Vis returns the visualizations using a go template
 func Vis(w http.ResponseWriter, r *http.Request) {
-
-	var err error
+	templateFiles := append(layoutTemplateFiles, "vis.html")
+	var visTemplate = templates.GetTemplate(templateFiles...)
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "stats", "/viz", "Visualizations")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "stats", "/viz", "Visualizations", templateFiles)
 
-	err = visTemplate.ExecuteTemplate(w, "layout", data)
-
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "vis.go", "Vis", "", visTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
@@ -55,7 +47,7 @@ func VisBlocks(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		logger.Errorf("error retrieving block tree data: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -78,13 +70,16 @@ func VisBlocks(w http.ResponseWriter, r *http.Request) {
 	err = json.NewEncoder(w).Encode(chartData)
 	if err != nil {
 		logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 }
 
 // VisVotes shows the votes visualizations using a go template
 func VisVotes(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "vis_votes.html")
+	var visVotesTemplate = templates.GetTemplate(templateFiles...)
+
 	var err error
 
 	w.Header().Set("Content-Type", "text/html")
@@ -106,7 +101,7 @@ func VisVotes(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		logger.Errorf("error retrieving votes tree data: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -117,7 +112,7 @@ func VisVotes(w http.ResponseWriter, r *http.Request) {
 		err := rows.Scan(&data.Slot, &data.BlockRoot, &data.ParentRoot, &data.Validators)
 		if err != nil {
 			logger.Errorf("error scanning votes tree data: %v", err)
-			http.Error(w, "Internal server error", 503)
+			http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 			return
 		}
 		chartData = append(chartData, data)
@@ -125,15 +120,10 @@ func VisVotes(w http.ResponseWriter, r *http.Request) {
 
 	logger.Printf("returning %v entries since %v", len(chartData), sinceSlot)
 
-	data := InitPageData(w, r, "vis", "/vis", "Votes")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "vis", "/vis", "Votes", templateFiles)
 	data.Data = &types.VisVotesPageData{ChartData: chartData}
 
-	err = visVotesTemplate.ExecuteTemplate(w, "layout", data)
-
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "vis.go", "VisVotes", "", visVotesTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }

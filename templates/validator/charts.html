@@ -64,6 +64,7 @@
                         xAxis: {
                             lineWidth: 0,
                             tickColor: '#e5e1e1',
+                            range: 31 * 24 * 60 * 60 * 1000
                         },
                         legend: {
                             enabled: true
@@ -98,7 +99,7 @@
                                 data: missed
                             },
                             {
-                                name: 'Orphaned',
+                                name: 'Missed (Orphaned)',
                                 data: orphaned
                             }
                         ],
@@ -155,7 +156,10 @@
     {{ if .IncomeHistoryChartData }}
         <script>
             var incomeHistory = {{.IncomeHistoryChartData}}
-            var currency = {{$.Currency}}
+            var executionIncomeHistory = {{ .ExecutionIncomeHistoryData }}
+            var currency = {{$.Rates.Currency}}
+            var ethPrice = {{$.Rates.EthPrice}}
+
                 window.addEventListener('load', function () {
                     Highcharts.stockChart('income-chart', {
                         colors: ["#7cb5ec", "#90ed7d", "#f7a35c", "#8085e9", "#f15c80", "#e4d354", "#2b908f", "#f45b5b", "#91e8e1"],
@@ -164,13 +168,35 @@
                         },
                         chart: {
                             type: 'column',
-                            height: '500px'
+                            height: '500px',
+                            pointInterval: 24 * 3600 * 1000
                         },
                         title: {
                             text: 'Daily Income'
                         },
                         legend: {
                             enabled: true
+                        },
+                        navigator: {
+                            series: {
+                                data: incomeHistory,
+                                color: '#7cb5ec',
+                            }
+                        },
+                        plotOptions: {
+                            column: {
+                                stacking: 'stacked',
+                                dataLabels: {
+                                    enabled: false
+                                },
+                                pointInterval: 24 * 3600 * 1000,
+                                dataGrouping: {
+                                    forced: true,
+                                    units: [
+                                        ['day', [1]]
+                                    ]
+                                }
+                            }
                         },
                         xAxis: {
                             type: 'datetime',
@@ -185,43 +211,55 @@
                         },
                         yAxis: [{
                             title: {
-                                text: 'Daily Income [' + currency + ']'
+                                text: `Income [${currency}]`
                             },
                             opposite: false,
                             labels: {
-                            formatter: function() {
+                                formatter: function() {
                                     if (currency !== "ETH") {
                                           return this.value.toFixed(2)
                                     }
                                     return this.value.toFixed(5)
-                              },
-
+                                },
                             }
                         }],
                         series: [{
-                            name: "Daily Income",
-                            data: incomeHistory
+                            name: "Consensus Income",
+                            data: incomeHistory,
+                            index: 2
                         },
-                            // {
-                            //     name: "Effective Balance",
-                            //     step: true,
-                            //     data: effectiveBalanceHistory
-                            // }
+                        {
+                            name: "Execution Income",
+                            data: executionIncomeHistory,
+                            index: 1
+                        }
                         ],
                         tooltip: {
-                            formatter: function (tooltip) {
-                                var orig = tooltip.defaultFormatter.call(this, tooltip)
-                                var epoch = timeToEpoch(this.x)
-                                orig[0] = `${orig[0]}<span style="font-size:10px">Epoch ${epoch}</span>`
-                                if(currency !== "ETH") {
-                                   orig[1] = `<span style=\"color:${this.points[0].color}\">●</span> Daily Income: <b>${this.y.toFixed(2)}</b><br/>`
+                            split: false,
+                            shared: true,
+                            formatter: (tooltip) => {
+                                var text = ``
+                                var total = 0
+
+                                // date and epochs
+                                const startEpoch = timeToEpoch(tooltip.chart.hoverPoint.x)
+                                const timeForOneDay = 24 * 60* 60 * 1000
+                                const endEpoch = timeToEpoch(tooltip.chart.hoverPoint.x + timeForOneDay) - 1
+                                text += `${new Date(tooltip.chart.hoverPoints[0].x).toLocaleDateString()} (Epochs ${startEpoch} - ${endEpoch})<br/>`;
+
+                                // income
+                                for (var i = 0; i < tooltip.chart.hoverPoints.length; i++) {
+                                    const value = tooltip.chart.hoverPoints[i].y;
+                                    text += `<span style="color:${tooltip.chart.hoverPoints[i].series.color}">\u25CF</span>  <b>${tooltip.chart.hoverPoints[i].series.name}:</b> ${getIncomeChartValueString(value, currency, ethPrice)}<br/>`
+                                    total += value
                                 }
-                                return orig
-                            },
-                            dateTimeLabelFormats: {
-                              day: "%A, %b %e, %Y",
-                              minute: "%A, %b %e",
-                              hour: "%A, %b %e",
+
+                                // add total if hovered point contains rewards for both EL and CL
+                                if (tooltip.chart.hoverPoints.length > 1) {
+                                    text += `<b>Total:</b> ${getIncomeChartValueString(total, currency, ethPrice)}`
+                                }
+
+                                return text
                             }
                         }
                     });

@@ -1,24 +1,19 @@
 package handlers
 
 import (
-	"eth2-exporter/utils"
-	"html/template"
+	"eth2-exporter/templates"
 	"net/http"
 )
 
-var educationServicesTemplate = template.Must(template.New("educationServices").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/educationServices.html"))
-
 func EducationServices(w http.ResponseWriter, r *http.Request) {
-	var err error
+	templateFiles := append(layoutTemplateFiles, "educationServices.html")
+	var educationServicesTemplate = templates.GetTemplate(templateFiles...)
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "services", "/educationServices", "Ethereum 2.0 Education Services Overview")
+	data := InitPageData(w, r, "services", "/educationServices", "Ethereum Education Services Overview", templateFiles)
 
-	err = educationServicesTemplate.ExecuteTemplate(w, "layout", data)
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "education.go", "EducationServices", "", educationServicesTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }

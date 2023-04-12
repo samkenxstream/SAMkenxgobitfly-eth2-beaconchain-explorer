@@ -3,30 +3,26 @@ package handlers
 import (
 	"encoding/json"
 	"eth2-exporter/db"
+	"eth2-exporter/templates"
 	"eth2-exporter/types"
 	"eth2-exporter/utils"
 	"fmt"
-	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
 )
 
-var validatorsLeaderboardTemplate = template.Must(template.New("validators").Funcs(utils.GetTemplateFuncs()).ParseFiles("templates/layout.html", "templates/validators_leaderboard.html"))
-
 // ValidatorsLeaderboard returns the validator-leaderboard using a go template
 func ValidatorsLeaderboard(w http.ResponseWriter, r *http.Request) {
+	templateFiles := append(layoutTemplateFiles, "validators_leaderboard.html")
+	var validatorsLeaderboardTemplate = templates.GetTemplate(templateFiles...)
+
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "validators", "/validators/leaderboard", "Validator Staking Leaderboard")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "validators", "/validators/leaderboard", "Validator Staking Leaderboard", templateFiles)
 
-	err := validatorsLeaderboardTemplate.ExecuteTemplate(w, "layout", data)
-
-	if err != nil {
-		logger.Errorf("error executing template for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
-		return
+	if handleTemplateError(w, r, "validators_leaderboard.go", "ValidatorsLeaderboard", "", validatorsLeaderboardTemplate.ExecuteTemplate(w, "layout", data)) != nil {
+		return // an error has occurred and was processed
 	}
 }
 
@@ -42,38 +38,38 @@ func ValidatorsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	if len(search) > 128 {
 		search = search[:128]
 	}
-	var searchIndex *uint64
-	index, err := strconv.ParseUint(search, 10, 64)
-	if err == nil {
-		searchIndex = &index
-	}
+	// var searchIndex *uint64
+	// index, err := strconv.ParseUint(search, 10, 64)
+	// if err == nil {
+	// searchIndex = &index
+	// }
 
-	var searchPubkeyExact *string
-	var searchPubkeyLike *string
-	if searchPubkeyExactRE.MatchString(search) {
-		pubkey := strings.ToLower(strings.Replace(search, "0x", "", -1))
-		searchPubkeyExact = &pubkey
-	} else if searchPubkeyLikeRE.MatchString(search) {
-		pubkey := strings.ToLower(strings.Replace(search, "0x", "", -1))
-		searchPubkeyLike = &pubkey
-	}
+	// var searchPubkeyExact *string
+	// var searchPubkeyLike *string
+	// if searchPubkeyExactRE.MatchString(search) {
+	// 	pubkey := strings.ToLower(strings.Replace(search, "0x", "", -1))
+	// 	searchPubkeyExact = &pubkey
+	// } else if searchPubkeyLikeRE.MatchString(search) {
+	// 	pubkey := strings.ToLower(strings.Replace(search, "0x", "", -1))
+	// 	searchPubkeyLike = &pubkey
+	// }
 
 	draw, err := strconv.ParseUint(q.Get("draw"), 10, 64)
 	if err != nil {
 		logger.Errorf("error converting datatables data parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	start, err := strconv.ParseUint(q.Get("start"), 10, 64)
 	if err != nil {
 		logger.Errorf("error converting datatables start parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	length, err := strconv.ParseUint(q.Get("length"), 10, 64)
 	if err != nil {
 		logger.Errorf("error converting datatables length parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	if length > 100 {
@@ -82,14 +78,14 @@ func ValidatorsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 
 	orderColumn := q.Get("order[0][column]")
 	orderByMap := map[string]string{
-		"4": "performance1d",
-		"5": "performance7d",
-		"6": "performance31d",
-		"7": "performance365d",
+		"4": "cl_performance_1d",
+		"5": "cl_performance_7d",
+		"6": "cl_performance_31d",
+		"7": "cl_performance_365d",
 	}
 	orderBy, exists := orderByMap[orderColumn]
 	if !exists {
-		orderBy = "performance7d"
+		orderBy = "cl_performance_7d"
 	}
 
 	orderDir := q.Get("order[0][dir]")
@@ -100,17 +96,31 @@ func ValidatorsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	var totalCount uint64
 	var performanceData []*types.ValidatorPerformance
 
-	if search == "" {
-		err = db.ReaderDb.Select(&performanceData, `
+	// if search == "" {
+	err = db.ReaderDb.Select(&performanceData, `
 			SELECT 
-				a.*,
+				a.rank,
+				a.balance, 
+				a.performance1d, 
+				a.performance7d, 
+				a.performance31d, 
+				a.performance365d, 
+				a.rank7d, 
+				a.validatorindex,
 				validators.pubkey,
 				COALESCE(validator_names.name, '') AS name,
 				cnt.total_count
 			FROM (
 					SELECT
-						ROW_NUMBER() OVER (ORDER BY `+orderBy+` DESC) AS rank,
-						validator_performance.*
+						ROW_NUMBER() OVER (ORDER BY `+orderBy+` DESC) AS rank,						
+						validator_performance.balance, 
+						COALESCE(validator_performance.cl_performance_1d, 0) AS performance1d, 
+						COALESCE(validator_performance.cl_performance_7d, 0) AS performance7d, 
+						COALESCE(validator_performance.cl_performance_31d, 0) AS performance31d, 
+						COALESCE(validator_performance.cl_performance_365d, 0) AS performance365d, 
+						COALESCE(validator_performance.cl_performance_total, 0) AS performanceTotal, 
+						validator_performance.rank7d, 
+						validator_performance.validatorindex
 					FROM validator_performance
 					ORDER BY `+orderBy+` `+orderDir+`
 					LIMIT $1 OFFSET $2
@@ -118,47 +128,10 @@ func ValidatorsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 			LEFT JOIN validators ON validators.validatorindex = a.validatorindex
 			LEFT JOIN validator_names ON validators.pubkey = validator_names.publickey
 			LEFT JOIN (SELECT COUNT(*) FROM validator_performance) cnt(total_count) ON true`, length, start)
-	} else {
-		// for perfomance-reasons we combine multiple search results with `union`
-		args := []interface{}{}
-		args = append(args, "%"+strings.ToLower(search)+"%")
-		searchQry := fmt.Sprintf(`SELECT publickey AS pubkey FROM validator_names WHERE LOWER(name) LIKE $%d `, len(args))
-		if searchIndex != nil {
-			args = append(args, *searchIndex)
-			searchQry += fmt.Sprintf(`UNION SELECT pubkey FROM validators WHERE validatorindex = $%d `, len(args))
-		}
 
-		if searchPubkeyExact != nil {
-			args = append(args, *searchPubkeyExact)
-			searchQry += fmt.Sprintf(`UNION SELECT pubkey FROM validators WHERE pubkeyhex = $%d `, len(args))
-		} else if searchPubkeyLike != nil {
-			args = append(args, *searchPubkeyLike+"%")
-			searchQry += fmt.Sprintf(`UNION SELECT pubkey FROM validators WHERE pubkeyhex LIKE $%d `, len(args))
-		}
-
-		args = append(args, length)
-		args = append(args, start)
-		qry := fmt.Sprintf(`
-			WITH matched_validators AS (%v)
-			SELECT 
-				v.validatorindex, mv.pubkey, COALESCE(vn.name, '') as name,
-				perf.rank, perf.balance, perf.performance1d, perf.performance7d, perf.performance31d, perf.performance365d, 
-				cnt.total_count
-			FROM matched_validators mv
-			INNER JOIN validators v ON v.pubkey = mv.pubkey
-			LEFT JOIN validator_names vn ON vn.publickey = mv.pubkey
-			LEFT JOIN (SELECT COUNT(*) FROM matched_validators) cnt(total_count) ON true
-			LEFT JOIN (
-				SELECT ROW_NUMBER() OVER (ORDER BY `+orderBy+` DESC) AS rank, validator_performance.*
-				FROM validator_performance
-				ORDER BY `+orderBy+` `+orderDir+`
-			) perf ON perf.validatorindex = v.validatorindex
-			LIMIT $%d OFFSET $%d`, searchQry, len(args)-1, len(args))
-		err = db.ReaderDb.Select(&performanceData, qry, args...)
-	}
 	if err != nil {
 		logger.Errorf("error retrieving performanceData data (search=%v): %v", search != "", err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 	if len(performanceData) > 0 {
@@ -189,7 +162,7 @@ func ValidatorsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	err = json.NewEncoder(w).Encode(data)
 	if err != nil {
 		logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", 503)
+		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
 		return
 	}
 }
